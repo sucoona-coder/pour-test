@@ -1,0 +1,11 @@
+{
+  "name": "impostor-game",
+  "version": "1.0.0",
+  "scripts": {
+    "dev": "vercel dev"
+  },
+  "dependencies": {
+    "pusher": "^5.2.0",
+    "pusher-js": "^8.4.0"
+  }
+}
