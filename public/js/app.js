@@ -24,14 +24,18 @@ const S = {
   myCustomRole: null,
   myDesc:       null,
   hasVoted:     false,
-  editRoles:    [],   // rôles en cours d'édition (hôte)
+  editRoles:    [],
   pollTimer:    null,
   clientTimer:  null,
   timerMax:     60,
   timerValue:   0,
   lastMsgCount: 0,
   avatarTarget: null,
-  voteResult:   null  // dernier résultat de vote à afficher
+  voteResult:   null,
+  // Cache pour le diff DOM
+  _prevPlayersHash: null,
+  _prevPhase:       null,
+  _prevConfig:      null
 };
 
 function getOrCreateId() {
@@ -75,6 +79,17 @@ function stopPolling() {
   if (S.pollTimer) { clearInterval(S.pollTimer); S.pollTimer = null; }
 }
 
+// ─── Hash rapide pour détecter les vrais changements ────────
+function hashPlayers(players) {
+  return players.map(p =>
+    `${p.id}:${p.name}:${p.avatar}:${p.isAlive}:${p.hasVoted}:${p.votedBy}:${p.isHost}`
+  ).join('|');
+}
+
+function hashConfig(config) {
+  return JSON.stringify(config);
+}
+
 // ─── Applique l'état reçu du serveur ─────────────────────────
 function applyRoomState(room) {
   const prevPhase = S.phase;
@@ -104,13 +119,15 @@ function applyRoomState(room) {
     handlePhaseChange(room.phase, room);
   }
 
-  // Met à jour l'affichage selon la phase courante
+  // Met à jour l'affichage selon la phase courante — avec diff
   if (room.phase === 'lobby') {
     renderLobby();
   } else if (room.phase === 'discussion' || room.phase === 'vote') {
-    renderGamePlayers();
-    updatePhaseBadge(room.phase);
-    // Sync timer depuis timerEnd serveur
+    renderGamePlayersIfChanged();
+    if (S._prevPhase !== room.phase) {
+      updatePhaseBadge(room.phase);
+      S._prevPhase = room.phase;
+    }
     if (room.timerEnd) syncTimer(room.timerEnd, room.phase);
   } else if (room.phase === 'result' && prevPhase !== 'result') {
     showResultScreen(room.winner, room.players, room.hostId);
@@ -121,23 +138,24 @@ function handlePhaseChange(newPhase, room) {
   if (newPhase === 'discussion') {
     showScreen('game');
     S.hasVoted = false;
+    S._prevPlayersHash = null; // force re-render complet au changement de phase
     updatePhaseBadge('discussion');
     clearChat();
     S.lastMsgCount = 0;
     updateMyRoleCard();
   } else if (newPhase === 'vote') {
     S.hasVoted = false;
+    S._prevPlayersHash = null;
     updatePhaseBadge('vote');
   } else if (newPhase === 'result') {
     stopClientTimer();
   }
 }
 
-// ─── Timer client (synchronisé sur timerEnd serveur) ─────────
+// ─── Timer client ─────────────────────────────────────────────
 function syncTimer(timerEnd, phase) {
   const remaining = Math.max(0, Math.round((timerEnd - Date.now()) / 1000));
   const max = phase === 'vote' ? 30 : S.config.timer;
-  // Recrée le timer seulement si la valeur a significativement dévié
   if (Math.abs(S.timerValue - remaining) > 3 || S.clientTimer === null) {
     startClientTimer(remaining, max);
   }
@@ -170,37 +188,79 @@ function updateTimerUI(val, max) {
   document.getElementById('timer-display').style.color = urgent ? 'var(--gold)' : 'var(--accent)';
 }
 
-// ─── Rendu Lobby ─────────────────────────────────────────────
+// ─── Rendu Lobby — diff sur les joueurs + config ──────────────
 function renderLobby() {
   const isHost = S.playerId === S.hostId;
   document.getElementById('host-panel').classList.toggle('hidden', !isHost);
   document.getElementById('waiting-panel').classList.toggle('hidden', isHost);
   document.getElementById('host-game-controls').classList.toggle('hidden', !isHost);
-  document.getElementById('player-count').textContent = S.players.length;
 
+  // Count badge — mise à jour text only
+  const countEl = document.getElementById('player-count');
+  const newCount = String(S.players.length);
+  if (countEl.textContent !== newCount) countEl.textContent = newCount;
+
+  // Config steppers — ne touche que si changé
   if (isHost) {
-    document.getElementById('imp-val').textContent   = S.config.impostorCount;
-    document.getElementById('timer-val').textContent = S.config.timer;
+    const impVal   = document.getElementById('imp-val');
+    const timerVal = document.getElementById('timer-val');
+    const impStr   = String(S.config.impostorCount);
+    const timerStr = String(S.config.timer);
+    if (impVal.textContent   !== impStr)   impVal.textContent   = impStr;
+    if (timerVal.textContent !== timerStr) timerVal.textContent = timerStr;
     renderRolesList();
   }
 
+  // Players grid — diff par hash
+  const newHash = hashPlayers(S.players) + (isHost ? ':host' : '');
+  if (newHash === S._prevPlayersHash) return; // rien à changer
+  S._prevPlayersHash = newHash;
+
   const grid = document.getElementById('players-grid');
-  grid.innerHTML = '';
-  S.players.forEach(p => {
-    const el = document.createElement('div');
-    el.className = `player-card${p.isHost ? ' is-host' : ''}`;
-    el.innerHTML = `
+  // Diff par id : retire ceux qui ne sont plus là, ajoute les nouveaux
+  const existingIds = new Set([...grid.children].map(el => el.dataset.pid));
+  const newIds      = new Set(S.players.map(p => p.id));
+
+  // Supprime les éléments obsolètes
+  [...grid.children].forEach(el => {
+    if (!newIds.has(el.dataset.pid)) el.remove();
+  });
+
+  // Ajoute ou met à jour
+  S.players.forEach((p, idx) => {
+    let el = grid.querySelector(`[data-pid="${p.id}"]`);
+    const html = `
       <span class="p-avatar">${p.avatar}</span>
       <div class="p-info">
         <div class="p-name">${esc(p.name)}${p.id===S.playerId?' <span style="color:var(--cyan);font-size:.65rem">(toi)</span>':''}</div>
         ${p.isHost ? '<div class="p-badge">👑 Hôte</div>' : ''}
       </div>`;
-    grid.appendChild(el);
+
+    if (!el) {
+      el = document.createElement('div');
+      el.dataset.pid = p.id;
+      el.className = `player-card${p.isHost ? ' is-host' : ''}`;
+      el.innerHTML = html;
+      grid.appendChild(el);
+    } else {
+      // Met à jour uniquement si le contenu a changé
+      const newClass = `player-card${p.isHost ? ' is-host' : ''}`;
+      if (el.className !== newClass) el.className = newClass;
+      // Compare innerHTML (cheap car déjà hashé globalement)
+      const trimmed = el.innerHTML.replace(/\s+/g, ' ').trim();
+      const target  = html.replace(/\s+/g, ' ').trim();
+      if (trimmed !== target) el.innerHTML = html;
+    }
   });
 }
 
 // ─── Éditeur de rôles ─────────────────────────────────────────
 function renderRolesList() {
+  // Vérifie si les rôles ont changé avant de reconstruire
+  const newHash = JSON.stringify(S.editRoles);
+  if (newHash === S._prevRolesHash) return;
+  S._prevRolesHash = newHash;
+
   const list = document.getElementById('roles-list');
   if (!list) return;
   list.innerHTML = '';
@@ -232,15 +292,18 @@ function renderRolesList() {
 
 function addRole() {
   S.editRoles.push({ name:'', description:'', type:'crewmate' });
+  S._prevRolesHash = null; // force re-render
   renderRolesList();
 }
 function deleteRole(i) {
   S.editRoles.splice(i, 1);
+  S._prevRolesHash = null;
   renderRolesList();
   saveConfig();
 }
 function setRoleType(i, type) {
   S.editRoles[i].type = type;
+  S._prevRolesHash = null;
   renderRolesList();
   saveConfig();
 }
@@ -257,30 +320,63 @@ async function saveConfig() {
   } catch(e) {}
 }
 
-// ─── Rendu joueurs en jeu ─────────────────────────────────────
+// ─── Rendu joueurs en jeu — diff par hash ─────────────────────
+function renderGamePlayersIfChanged() {
+  const newHash = hashPlayers(S.players) + ':' + S.phase + ':' + S.hasVoted;
+  if (newHash === S._prevPlayersHash) return;
+  S._prevPlayersHash = newHash;
+  renderGamePlayers();
+}
+
 function renderGamePlayers() {
   const list = document.getElementById('game-players');
   if (!list) return;
-  list.innerHTML = '';
+
   const isVote  = S.phase === 'vote';
   const me      = S.players.find(p => p.id === S.playerId);
   const meAlive = me?.isAlive;
 
-  S.players.forEach(p => {
-    const el = document.createElement('div');
-    el.className = `gp-item${!p.isAlive?' dead':''}`;
-    const canVote = isVote && meAlive && p.isAlive && p.id !== S.playerId && !S.hasVoted;
-    if (canVote) el.classList.add('vote-target');
+  const existingIds = new Set([...list.children].map(el => el.dataset.pid));
+  const newIds      = new Set(S.players.map(p => p.id));
 
-    el.innerHTML = `
+  // Supprime les éléments obsolètes
+  [...list.children].forEach(el => {
+    if (!newIds.has(el.dataset.pid)) el.remove();
+  });
+
+  S.players.forEach(p => {
+    const canVote = isVote && meAlive && p.isAlive && p.id !== S.playerId && !S.hasVoted;
+    let el = list.querySelector(`[data-pid="${p.id}"]`);
+
+    const classes = [
+      'gp-item',
+      !p.isAlive  ? 'dead'        : '',
+      canVote     ? 'vote-target' : '',
+      p.hasVoted && isVote ? 'voted' : ''
+    ].filter(Boolean).join(' ');
+
+    const html = `
       <span class="gp-avatar">${p.avatar}</span>
       <span class="gp-name">${esc(p.name)}</span>
       ${p.id===S.playerId ? '<span class="gp-you">MOI</span>' : ''}
       ${!p.isAlive ? '<span class="gp-dead">💀</span>' : ''}
       ${isVote && p.votedBy > 0 ? `<span class="gp-votes">${p.votedBy}✗</span>` : ''}`;
 
-    if (canVote) el.addEventListener('click', () => doVote(p.id));
-    list.appendChild(el);
+    if (!el) {
+      el = document.createElement('div');
+      el.dataset.pid = p.id;
+      el.className = classes;
+      el.innerHTML = html;
+      list.appendChild(el);
+    } else {
+      if (el.className !== classes) el.className = classes;
+      const trimmed = el.innerHTML.replace(/\s+/g, ' ').trim();
+      const target  = html.replace(/\s+/g, ' ').trim();
+      if (trimmed !== target) el.innerHTML = html;
+    }
+
+    // Remet le listener de vote proprement (évite les doublons)
+    el.onclick = canVote ? () => doVote(p.id) : null;
   });
 }
 
@@ -288,7 +384,6 @@ function updatePhaseBadge(phase) {
   const b = document.getElementById('phase-badge');
   b.textContent = phase === 'vote' ? 'Vote' : 'Discussion';
   b.className   = `phase-badge${phase==='vote'?' vote':''}`;
-  // Bouton "passer au vote" visible seulement en discussion pour l'hôte
   const hc = document.getElementById('host-game-controls');
   if (S.playerId === S.hostId) hc.classList.toggle('hidden', phase !== 'discussion');
 }
@@ -318,7 +413,6 @@ function showRoleOverlay(role, customRole, description) {
 async function doVote(targetId) {
   if (S.hasVoted) return;
   S.hasVoted = true;
-  // UI immédiate
   document.querySelectorAll('.vote-target').forEach(e => e.classList.remove('vote-target'));
   try {
     const res = await api('vote', { roomCode: S.roomCode, playerId: S.playerId, targetId });
@@ -435,7 +529,7 @@ function openAvatarModal(target) {
   document.getElementById('avatar-modal').classList.remove('hidden');
 }
 
-// ─── Utilitaires UI ──────────────────────────────────────────
+// ─── Utilitaires UI ───────────────────────────────────────────
 function showScreen(name) {
   document.querySelectorAll('.screen').forEach(s => s.classList.remove('active'));
   document.getElementById(`screen-${name}`).classList.add('active');
@@ -484,11 +578,13 @@ async function joinRoom() {
 }
 
 function initRoom(data) {
-  S.roomCode  = data.code;
-  S.hostId    = data.room.hostId;
-  S.players   = data.room.players;
-  S.config    = data.room.config;
-  S.editRoles = [...(data.room.config.customRoles || [])];
+  S.roomCode          = data.code;
+  S.hostId            = data.room.hostId;
+  S.players           = data.room.players;
+  S.config            = data.room.config;
+  S.editRoles         = [...(data.room.config.customRoles || [])];
+  S._prevPlayersHash  = null;
+  S._prevRolesHash    = null;
   document.getElementById('lobby-code').textContent = data.code;
   showScreen('lobby');
   renderLobby();
@@ -496,9 +592,9 @@ function initRoom(data) {
 }
 
 async function startGame() {
-  // Réinitialise état local
   S.myRole = null; S.myCustomRole = null; S.myDesc = null;
   S.hasVoted = false; S.lastMsgCount = 0;
+  S._prevPlayersHash = null;
   try {
     const data = await api('start', { roomCode: S.roomCode, playerId: S.playerId });
     applyRoomState(data.room);
@@ -514,7 +610,6 @@ async function leaveRoom() {
 // ─── Boot ─────────────────────────────────────────────────────
 document.addEventListener('DOMContentLoaded', () => {
 
-  // Accueil
   document.getElementById('btn-create').addEventListener('click', createRoom);
   document.getElementById('btn-join').addEventListener('click', joinRoom);
   document.getElementById('input-name-create').addEventListener('keydown', e => { if(e.key==='Enter') createRoom(); });
@@ -526,7 +621,6 @@ document.addEventListener('DOMContentLoaded', () => {
     document.getElementById('avatar-modal').classList.add('hidden');
   });
 
-  // Lobby
   document.getElementById('btn-leave').addEventListener('click', leaveRoom);
   document.getElementById('btn-copy').addEventListener('click', () => {
     navigator.clipboard.writeText(S.roomCode||'').then(() => showToast('Code copié !','ok'));
@@ -534,7 +628,6 @@ document.addEventListener('DOMContentLoaded', () => {
   document.getElementById('btn-start').addEventListener('click', startGame);
   document.getElementById('btn-add-role').addEventListener('click', addRole);
 
-  // Steppers
   document.getElementById('imp-minus').addEventListener('click', () => {
     if (S.config.impostorCount > 1) { S.config.impostorCount--; document.getElementById('imp-val').textContent = S.config.impostorCount; saveConfig(); }
   });
@@ -549,7 +642,6 @@ document.addEventListener('DOMContentLoaded', () => {
     if (S.config.timer < 300) { S.config.timer = Math.min(300, S.config.timer+10); document.getElementById('timer-val').textContent = S.config.timer; saveConfig(); }
   });
 
-  // Jeu
   document.getElementById('btn-vote-phase').addEventListener('click', async () => {
     try { await api('vote-phase', { roomCode: S.roomCode, playerId: S.playerId }); }
     catch(e) { showToast(e.message); }
@@ -557,7 +649,6 @@ document.addEventListener('DOMContentLoaded', () => {
   document.getElementById('btn-chat-send').addEventListener('click', sendChat);
   document.getElementById('chat-input').addEventListener('keydown', e => { if(e.key==='Enter') sendChat(); });
 
-  // Overlay rôle
   document.getElementById('btn-close-role').addEventListener('click', () => {
     document.getElementById('overlay-role').classList.add('hidden');
     showScreen('game');
@@ -566,12 +657,10 @@ document.addEventListener('DOMContentLoaded', () => {
     updatePhaseBadge(S.phase);
   });
 
-  // Overlay vote
   document.getElementById('btn-close-vote').addEventListener('click', () => {
     document.getElementById('overlay-vote').classList.add('hidden');
   });
 
-  // Résultat
   document.getElementById('btn-restart').addEventListener('click', () => {
     showScreen('lobby');
     S.phase = 'lobby';
@@ -580,7 +669,6 @@ document.addEventListener('DOMContentLoaded', () => {
   });
   document.getElementById('btn-home').addEventListener('click', () => location.reload());
 
-  // Quitter proprement
   window.addEventListener('beforeunload', () => {
     if (S.roomCode) navigator.sendBeacon('/api/room?action=leave', JSON.stringify({ roomCode: S.roomCode, playerId: S.playerId, action: 'leave' }));
   });
