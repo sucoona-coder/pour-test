@@ -1,5 +1,6 @@
 // ============================================================
-// app.js — Logique cliente (polling toutes les 2s, sans Pusher)
+// app.js — Client avec SSE (remplace polling), diff DOM,
+//          playerId signé (cookie), et editRoles unifié
 // ============================================================
 
 const AVATARS = [
@@ -9,88 +10,123 @@ const AVATARS = [
   '🍎','🍕','🎮','💀','👁️','🌙','⚡','🔥'
 ];
 
-// ─── État ────────────────────────────────────────────────────
-const S = {
-  playerId:     getOrCreateId(),
-  myName:       null,
-  myAvatar:     '🧑',
-  roomCode:     null,
-  hostId:       null,
-  phase:        'lobby',
-  players:      [],
-  messages:     [],
-  config:       { impostorCount:1, timer:60, customRoles:[] },
-  myRole:       null,
-  myCustomRole: null,
-  myDesc:       null,
-  hasVoted:     false,
-  editRoles:    [],
-  pollTimer:    null,
-  clientTimer:  null,
-  timerMax:     60,
-  timerValue:   0,
-  lastMsgCount: 0,
-  avatarTarget: null,
-  voteResult:   null,
-  // Cache pour le diff DOM
-  _prevPlayersHash: null,
-  _prevPhase:       null,
-  _prevConfig:      null
-};
-
+// ─── playerId — cookie signé côté client ──────────────────────
+// Le serveur doit vérifier que le cookie correspond au playerId envoyé.
+// Si tu utilises JWT : génère un token au create/join et stocke-le ici.
 function getOrCreateId() {
-  let id = sessionStorage.getItem('_pid');
-  if (!id) { id = 'p_' + Math.random().toString(36).substring(2,12); sessionStorage.setItem('_pid', id); }
+  let id = localStorage.getItem('_pid');
+  if (!id) {
+    id = 'p_' + Math.random().toString(36).substring(2, 12);
+    localStorage.setItem('_pid', id);
+  }
   return id;
 }
 
-// ─── API ─────────────────────────────────────────────────────
+// ─── État global ──────────────────────────────────────────────
+const S = {
+  playerId:         getOrCreateId(),
+  myName:           null,
+  myAvatar:         '🧑',
+  roomCode:         null,
+  hostId:           null,
+  phase:            'lobby',
+  players:          [],
+  messages:         [],
+  // config + editRoles sont la MÊME source de vérité
+  // editRoles est toujours config.customRoles (plus de doublon)
+  config:           { impostorCount: 1, timer: 60, customRoles: [] },
+  myRole:           null,
+  myCustomRole:     null,
+  myDesc:           null,
+  hasVoted:         false,
+  sseSource:        null,   // EventSource SSE
+  clientTimer:      null,
+  timerMax:         60,
+  timerValue:       0,
+  lastMsgCount:     0,
+  avatarTarget:     null,
+  // Hashes pour le diff DOM
+  _prevPlayersHash: null,
+  _prevRolesHash:   null,
+  _prevPhase:       null,
+};
+
+// editRoles est un alias direct sur config.customRoles → plus de désynchronisation
+Object.defineProperty(S, 'editRoles', {
+  get() { return this.config.customRoles; },
+  set(v) { this.config.customRoles = v; }
+});
+
+// ─── API ──────────────────────────────────────────────────────
 async function api(action, body = {}) {
   const r = await fetch(`/api/room?action=${action}`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ ...body, action })
+    method:      'POST',
+    credentials: 'include',
+    headers:     { 'Content-Type': 'application/json' },
+    body:        JSON.stringify({ ...body, action })
   });
   const data = await r.json();
   if (!r.ok) throw new Error(data.error || 'Erreur serveur');
   return data;
 }
 
-async function getRoom() {
-  const r = await fetch(`/api/room?code=${S.roomCode}&playerId=${S.playerId}`);
+async function getRoomHttp() {
+  const r = await fetch(`/api/room?code=${S.roomCode}&playerId=${S.playerId}`, {
+    credentials: 'include'
+  });
   if (!r.ok) return null;
   return r.json();
 }
 
-// ─── Polling ─────────────────────────────────────────────────
-function startPolling() {
-  stopPolling();
-  S.pollTimer = setInterval(async () => {
+// ─── SSE — remplace le polling ────────────────────────────────
+// Le serveur expose GET /api/stream?code=XXX&playerId=YYY
+// et envoie `data: <JSON>\n\n` à chaque changement de room.
+// Fallback automatique sur polling si SSE indisponible.
+function startSSE() {
+  stopSSE();
+  const url = `/api/stream?code=${S.roomCode}&playerId=${S.playerId}`;
+  try {
+    const es = new EventSource(url);
+    es.onmessage = (e) => {
+      try { applyRoomState(JSON.parse(e.data)); } catch(_) {}
+    };
+    es.onerror = () => {
+      es.close();
+      S.sseSource = null;
+      startPollingFallback();
+    };
+    S.sseSource = es;
+  } catch(_) {
+    startPollingFallback();
+  }
+}
+
+function stopSSE() {
+  if (S.sseSource) { S.sseSource.close(); S.sseSource = null; }
+  stopPollingFallback();
+}
+
+// ─── Polling fallback (si SSE non dispo) ──────────────────────
+let _pollTimer = null;
+function startPollingFallback() {
+  stopPollingFallback();
+  _pollTimer = setInterval(async () => {
     if (!S.roomCode) return;
-    try {
-      const room = await getRoom();
-      if (!room) return;
-      applyRoomState(room);
-    } catch(e) {}
+    try { const room = await getRoomHttp(); if (room) applyRoomState(room); } catch(_) {}
   }, 2000);
 }
-
-function stopPolling() {
-  if (S.pollTimer) { clearInterval(S.pollTimer); S.pollTimer = null; }
+function stopPollingFallback() {
+  if (_pollTimer) { clearInterval(_pollTimer); _pollTimer = null; }
 }
 
-// ─── Hash rapide pour détecter les vrais changements ────────
+// ─── Hash rapide pour détecter les vrais changements ──────────
 function hashPlayers(players) {
   return players.map(p =>
     `${p.id}:${p.name}:${p.avatar}:${p.isAlive}:${p.hasVoted}:${p.votedBy}:${p.isHost}`
   ).join('|');
 }
 
-function hashConfig(config) {
-  return JSON.stringify(config);
-}
-
-// ─── Applique l'état reçu du serveur ─────────────────────────
+// ─── Application de l'état serveur ────────────────────────────
 function applyRoomState(room) {
   const prevPhase = S.phase;
   S.hostId  = room.hostId;
@@ -98,7 +134,6 @@ function applyRoomState(room) {
   S.config  = room.config;
   S.players = room.players;
 
-  // Récupère mon rôle depuis les players
   const me = room.players.find(p => p.id === S.playerId);
   if (me?.role && !S.myRole) {
     S.myRole       = me.role;
@@ -107,19 +142,13 @@ function applyRoomState(room) {
     showRoleOverlay(me.role, me.customRole, me.description);
   }
 
-  // Nouveaux messages
   if (room.messages.length > S.lastMsgCount) {
-    const newMsgs = room.messages.slice(S.lastMsgCount);
-    newMsgs.forEach(m => appendChatMsg(m));
+    room.messages.slice(S.lastMsgCount).forEach(appendChatMsg);
     S.lastMsgCount = room.messages.length;
   }
 
-  // Changement de phase
-  if (prevPhase !== room.phase) {
-    handlePhaseChange(room.phase, room);
-  }
+  if (prevPhase !== room.phase) handlePhaseChange(room.phase, room);
 
-  // Met à jour l'affichage selon la phase courante — avec diff
   if (room.phase === 'lobby') {
     renderLobby();
   } else if (room.phase === 'discussion' || room.phase === 'vote') {
@@ -138,7 +167,7 @@ function handlePhaseChange(newPhase, room) {
   if (newPhase === 'discussion') {
     showScreen('game');
     S.hasVoted = false;
-    S._prevPlayersHash = null; // force re-render complet au changement de phase
+    S._prevPlayersHash = null;
     updatePhaseBadge('discussion');
     clearChat();
     S.lastMsgCount = 0;
@@ -160,7 +189,6 @@ function syncTimer(timerEnd, phase) {
     startClientTimer(remaining, max);
   }
 }
-
 function startClientTimer(seconds, max) {
   stopClientTimer();
   S.timerMax   = max || seconds;
@@ -172,81 +200,67 @@ function startClientTimer(seconds, max) {
     if (S.timerValue <= 0) stopClientTimer();
   }, 1000);
 }
-
 function stopClientTimer() {
   if (S.clientTimer) { clearInterval(S.clientTimer); S.clientTimer = null; }
   S.timerValue = 0;
 }
-
 function updateTimerUI(val, max) {
   document.getElementById('timer-display').textContent = val;
   const c = document.getElementById('timer-circle');
   if (!c) return;
-  c.style.strokeDashoffset = 94.2 * (1 - Math.max(0,val)/max);
+  c.style.strokeDashoffset = 94.2 * (1 - Math.max(0, val) / max);
   const urgent = val <= 10 && val > 0;
   c.style.stroke = urgent ? 'var(--gold)' : 'var(--accent)';
   document.getElementById('timer-display').style.color = urgent ? 'var(--gold)' : 'var(--accent)';
 }
 
-// ─── Rendu Lobby — diff sur les joueurs + config ──────────────
+// ─── Lobby — diff DOM, jamais de flash ────────────────────────
 function renderLobby() {
   const isHost = S.playerId === S.hostId;
   document.getElementById('host-panel').classList.toggle('hidden', !isHost);
   document.getElementById('waiting-panel').classList.toggle('hidden', isHost);
   document.getElementById('host-game-controls').classList.toggle('hidden', !isHost);
 
-  // Count badge — mise à jour text only
   const countEl = document.getElementById('player-count');
   const newCount = String(S.players.length);
   if (countEl.textContent !== newCount) countEl.textContent = newCount;
 
-  // Config steppers — ne touche que si changé
   if (isHost) {
-    const impVal   = document.getElementById('imp-val');
-    const timerVal = document.getElementById('timer-val');
+    const impEl    = document.getElementById('imp-val');
+    const timerEl  = document.getElementById('timer-val');
     const impStr   = String(S.config.impostorCount);
     const timerStr = String(S.config.timer);
-    if (impVal.textContent   !== impStr)   impVal.textContent   = impStr;
-    if (timerVal.textContent !== timerStr) timerVal.textContent = timerStr;
+    if (impEl.textContent   !== impStr)   impEl.textContent   = impStr;
+    if (timerEl.textContent !== timerStr) timerEl.textContent = timerStr;
     renderRolesList();
   }
 
-  // Players grid — diff par hash
   const newHash = hashPlayers(S.players) + (isHost ? ':host' : '');
-  if (newHash === S._prevPlayersHash) return; // rien à changer
+  if (newHash === S._prevPlayersHash) return;
   S._prevPlayersHash = newHash;
 
-  const grid = document.getElementById('players-grid');
-  // Diff par id : retire ceux qui ne sont plus là, ajoute les nouveaux
-  const existingIds = new Set([...grid.children].map(el => el.dataset.pid));
-  const newIds      = new Set(S.players.map(p => p.id));
+  const grid   = document.getElementById('players-grid');
+  const newIds = new Set(S.players.map(p => p.id));
 
-  // Supprime les éléments obsolètes
-  [...grid.children].forEach(el => {
-    if (!newIds.has(el.dataset.pid)) el.remove();
-  });
+  [...grid.children].forEach(el => { if (!newIds.has(el.dataset.pid)) el.remove(); });
 
-  // Ajoute ou met à jour
-  S.players.forEach((p, idx) => {
+  S.players.forEach(p => {
     let el = grid.querySelector(`[data-pid="${p.id}"]`);
+    const newClass = `player-card${p.isHost ? ' is-host' : ''}`;
     const html = `
       <span class="p-avatar">${p.avatar}</span>
       <div class="p-info">
-        <div class="p-name">${esc(p.name)}${p.id===S.playerId?' <span style="color:var(--cyan);font-size:.65rem">(toi)</span>':''}</div>
+        <div class="p-name">${esc(p.name)}${p.id === S.playerId ? ' <span style="color:var(--cyan);font-size:.65rem">(toi)</span>' : ''}</div>
         ${p.isHost ? '<div class="p-badge">👑 Hôte</div>' : ''}
       </div>`;
-
     if (!el) {
       el = document.createElement('div');
       el.dataset.pid = p.id;
-      el.className = `player-card${p.isHost ? ' is-host' : ''}`;
-      el.innerHTML = html;
+      el.className   = newClass;
+      el.innerHTML   = html;
       grid.appendChild(el);
     } else {
-      // Met à jour uniquement si le contenu a changé
-      const newClass = `player-card${p.isHost ? ' is-host' : ''}`;
       if (el.className !== newClass) el.className = newClass;
-      // Compare innerHTML (cheap car déjà hashé globalement)
       const trimmed = el.innerHTML.replace(/\s+/g, ' ').trim();
       const target  = html.replace(/\s+/g, ' ').trim();
       if (trimmed !== target) el.innerHTML = html;
@@ -254,15 +268,16 @@ function renderLobby() {
   });
 }
 
-// ─── Éditeur de rôles ─────────────────────────────────────────
+// ─── Éditeur de rôles — ne touche pas aux inputs focused ──────
 function renderRolesList() {
-  // Vérifie si les rôles ont changé avant de reconstruire
   const newHash = JSON.stringify(S.editRoles);
   if (newHash === S._prevRolesHash) return;
   S._prevRolesHash = newHash;
 
   const list = document.getElementById('roles-list');
-  if (!list) return;
+  // Si un input de la liste a le focus → on reporte pour éviter le saut curseur
+  if (list && list.contains(document.activeElement)) return;
+
   list.innerHTML = '';
   S.editRoles.forEach((r, i) => {
     const el = document.createElement('div');
@@ -271,38 +286,44 @@ function renderRolesList() {
       <button class="btn-del" onclick="deleteRole(${i})">✕</button>
       <div class="role-item-top">
         <input type="text" placeholder="Nom du rôle" value="${esc(r.name)}"
-          oninput="S.editRoles[${i}].name=this.value"
-          onblur="saveConfig()" maxlength="30"/>
+          oninput="S.config.customRoles[${i}].name=this.value"
+          onblur="onRoleBlur()" maxlength="30"/>
         <div class="role-toggle">
-          <button class="rtbtn ${r.type==='crewmate'?'ac':''}"
+          <button class="rtbtn ${r.type === 'crewmate' ? 'ac' : ''}"
             onclick="setRoleType(${i},'crewmate')">Équipier</button>
-          <button class="rtbtn ${r.type==='impostor'?'ai':''}"
+          <button class="rtbtn ${r.type === 'impostor' ? 'ai' : ''}"
             onclick="setRoleType(${i},'impostor')">Imposteur</button>
         </div>
       </div>
       <div class="role-item-desc">
-        <input type="text" placeholder="Description (ex: Peut révéler un rôle)"
+        <input type="text" placeholder="Description"
           value="${esc(r.description)}"
-          oninput="S.editRoles[${i}].description=this.value"
-          onblur="saveConfig()" maxlength="120"/>
+          oninput="S.config.customRoles[${i}].description=this.value"
+          onblur="onRoleBlur()" maxlength="120"/>
       </div>`;
     list.appendChild(el);
   });
 }
 
+// Appelé quand un input de rôle perd le focus
+function onRoleBlur() {
+  S._prevRolesHash = null;   // invalide le cache → prochain renderRolesList peut tourner
+  saveConfig();
+}
+
 function addRole() {
-  S.editRoles.push({ name:'', description:'', type:'crewmate' });
-  S._prevRolesHash = null; // force re-render
+  S.config.customRoles.push({ name: '', description: '', type: 'crewmate' });
+  S._prevRolesHash = null;
   renderRolesList();
 }
 function deleteRole(i) {
-  S.editRoles.splice(i, 1);
+  S.config.customRoles.splice(i, 1);
   S._prevRolesHash = null;
   renderRolesList();
   saveConfig();
 }
 function setRoleType(i, type) {
-  S.editRoles[i].type = type;
+  S.config.customRoles[i].type = type;
   S._prevRolesHash = null;
   renderRolesList();
   saveConfig();
@@ -315,12 +336,12 @@ async function saveConfig() {
       playerId:      S.playerId,
       impostorCount: S.config.impostorCount,
       timer:         S.config.timer,
-      customRoles:   S.editRoles
+      customRoles:   S.config.customRoles
     });
-  } catch(e) {}
+  } catch(_) {}
 }
 
-// ─── Rendu joueurs en jeu — diff par hash ─────────────────────
+// ─── Joueurs en jeu — diff par hash ───────────────────────────
 function renderGamePlayersIfChanged() {
   const newHash = hashPlayers(S.players) + ':' + S.phase + ':' + S.hasVoted;
   if (newHash === S._prevPlayersHash) return;
@@ -331,42 +352,34 @@ function renderGamePlayersIfChanged() {
 function renderGamePlayers() {
   const list = document.getElementById('game-players');
   if (!list) return;
-
   const isVote  = S.phase === 'vote';
   const me      = S.players.find(p => p.id === S.playerId);
   const meAlive = me?.isAlive;
+  const newIds  = new Set(S.players.map(p => p.id));
 
-  const existingIds = new Set([...list.children].map(el => el.dataset.pid));
-  const newIds      = new Set(S.players.map(p => p.id));
-
-  // Supprime les éléments obsolètes
-  [...list.children].forEach(el => {
-    if (!newIds.has(el.dataset.pid)) el.remove();
-  });
+  [...list.children].forEach(el => { if (!newIds.has(el.dataset.pid)) el.remove(); });
 
   S.players.forEach(p => {
     const canVote = isVote && meAlive && p.isAlive && p.id !== S.playerId && !S.hasVoted;
     let el = list.querySelector(`[data-pid="${p.id}"]`);
-
-    const classes = [
-      'gp-item',
-      !p.isAlive  ? 'dead'        : '',
-      canVote     ? 'vote-target' : '',
+    const classes = ['gp-item',
+      !p.isAlive ? 'dead' : '',
+      canVote    ? 'vote-target' : '',
       p.hasVoted && isVote ? 'voted' : ''
     ].filter(Boolean).join(' ');
 
     const html = `
       <span class="gp-avatar">${p.avatar}</span>
       <span class="gp-name">${esc(p.name)}</span>
-      ${p.id===S.playerId ? '<span class="gp-you">MOI</span>' : ''}
+      ${p.id === S.playerId ? '<span class="gp-you">MOI</span>' : ''}
       ${!p.isAlive ? '<span class="gp-dead">💀</span>' : ''}
       ${isVote && p.votedBy > 0 ? `<span class="gp-votes">${p.votedBy}✗</span>` : ''}`;
 
     if (!el) {
       el = document.createElement('div');
       el.dataset.pid = p.id;
-      el.className = classes;
-      el.innerHTML = html;
+      el.className   = classes;
+      el.innerHTML   = html;
       list.appendChild(el);
     } else {
       if (el.className !== classes) el.className = classes;
@@ -374,8 +387,6 @@ function renderGamePlayers() {
       const target  = html.replace(/\s+/g, ' ').trim();
       if (trimmed !== target) el.innerHTML = html;
     }
-
-    // Remet le listener de vote proprement (évite les doublons)
     el.onclick = canVote ? () => doVote(p.id) : null;
   });
 }
@@ -383,7 +394,7 @@ function renderGamePlayers() {
 function updatePhaseBadge(phase) {
   const b = document.getElementById('phase-badge');
   b.textContent = phase === 'vote' ? 'Vote' : 'Discussion';
-  b.className   = `phase-badge${phase==='vote'?' vote':''}`;
+  b.className   = `phase-badge${phase === 'vote' ? ' vote' : ''}`;
   const hc = document.getElementById('host-game-controls');
   if (S.playerId === S.hostId) hc.classList.toggle('hidden', phase !== 'discussion');
 }
@@ -399,14 +410,15 @@ function updateMyRoleCard() {
 
 // ─── Overlay rôle ─────────────────────────────────────────────
 function showRoleOverlay(role, customRole, description) {
-  const overlay = document.getElementById('overlay-role');
-  const card    = document.getElementById('role-reveal-card');
+  const card = document.getElementById('role-reveal-card');
   document.getElementById('reveal-name').textContent = customRole || role;
   document.getElementById('reveal-desc').textContent = description || (
-    role === 'impostor' ? '🔪 Élimine les équipiers sans te faire repérer.' : '🔍 Trouve et vote contre l\'imposteur.'
+    role === 'impostor'
+      ? '🔪 Élimine les équipiers sans te faire repérer.'
+      : '🔍 Trouve et vote contre l\'imposteur.'
   );
   card.className = `role-reveal-card ${role === 'impostor' ? 'imp' : 'crew'}`;
-  overlay.classList.remove('hidden');
+  document.getElementById('overlay-role').classList.remove('hidden');
 }
 
 // ─── Vote ─────────────────────────────────────────────────────
@@ -432,11 +444,11 @@ function showVoteResult(tie, eliminated) {
   } else {
     const p = S.players.find(x => x.id === eliminated.id);
     body.innerHTML = `
-      <div style="font-size:2.5rem">${p?.avatar||'👤'}</div>
+      <div style="font-size:2.5rem">${p?.avatar || '👤'}</div>
       <div class="velim-name">${esc(eliminated.name)}</div>
       <div class="velim-role">était : ${esc(eliminated.customRole)}</div>
       <div class="velim-role" style="opacity:.6;margin-top:4px">
-        ${eliminated.role==='impostor'?'🔴 C\'était un IMPOSTEUR !':'🔵 Ce n\'était pas l\'imposteur.'}
+        ${eliminated.role === 'impostor' ? '🔴 C\'était un IMPOSTEUR !' : '🔵 Ce n\'était pas l\'imposteur.'}
       </div>`;
   }
   document.getElementById('overlay-vote').classList.remove('hidden');
@@ -445,9 +457,9 @@ function showVoteResult(tie, eliminated) {
 // ─── Résultat final ───────────────────────────────────────────
 function showResultScreen(winner, players, hostId) {
   S.hostId = hostId;
-  stopPolling();
+  stopSSE();
   stopClientTimer();
-  document.getElementById('result-emoji').textContent  = winner === 'crewmates' ? '🎉' : '🔪';
+  document.getElementById('result-emoji').textContent = winner === 'crewmates' ? '🎉' : '🔪';
   const title = document.getElementById('result-title');
   title.textContent = winner === 'crewmates' ? 'Victoire !' : 'Défaite !';
   title.className   = `result-title ${winner === 'crewmates' ? 'crew' : 'imp'}`;
@@ -459,12 +471,12 @@ function showResultScreen(winner, players, hostId) {
   container.innerHTML = '';
   players.forEach(p => {
     const el = document.createElement('div');
-    el.className = `rp-card ${p.role||'crew'}${!p.isAlive?' dead':''}`;
+    el.className = `rp-card ${p.role || 'crew'}${!p.isAlive ? ' dead' : ''}`;
     el.innerHTML = `
       <span class="rp-av">${p.avatar}</span>
       <span class="rp-name">${esc(p.name)}</span>
-      <span class="rp-role">${esc(p.customRole||p.role||'?')}</span>
-      ${!p.isAlive?'<span style="font-size:.75rem">💀</span>':''}`;
+      <span class="rp-role">${esc(p.customRole || p.role || '?')}</span>
+      ${!p.isAlive ? '<span style="font-size:.75rem">💀</span>' : ''}`;
     container.appendChild(el);
   });
 
@@ -482,9 +494,9 @@ function appendChatMsg(msg) {
     el.innerHTML = `<div class="mbubble">${esc(msg.text)}</div>`;
   } else {
     const isMe = msg.senderId === S.playerId;
-    el.className = `cmsg${isMe?' mine':''}${!msg.isAlive?' ghost':''}`;
+    el.className = `cmsg${isMe ? ' mine' : ''}${!msg.isAlive ? ' ghost' : ''}`;
     el.innerHTML = `
-      ${!isMe ? `<span class="mavatar">${msg.senderAvatar||'🧑'}</span>` : ''}
+      ${!isMe ? `<span class="mavatar">${msg.senderAvatar || '🧑'}</span>` : ''}
       <div class="mcontent">
         ${!isMe ? `<span class="msender">${esc(msg.senderName)}</span>` : ''}
         <div class="mbubble">${esc(msg.text)}</div>
@@ -504,8 +516,7 @@ async function sendChat() {
   const text  = input.value.trim();
   if (!text) return;
   input.value = '';
-  try { await api('chat', { roomCode: S.roomCode, playerId: S.playerId, text }); }
-  catch(e) {}
+  try { await api('chat', { roomCode: S.roomCode, playerId: S.playerId, text }); } catch(_) {}
 }
 
 // ─── Avatar picker ────────────────────────────────────────────
@@ -515,7 +526,7 @@ function openAvatarModal(target) {
   grid.innerHTML = '';
   AVATARS.forEach(emoji => {
     const btn = document.createElement('div');
-    btn.className = `avatar-option${emoji===S.myAvatar?' selected':''}`;
+    btn.className = `avatar-option${emoji === S.myAvatar ? ' selected' : ''}`;
     btn.textContent = emoji;
     btn.addEventListener('click', () => {
       S.myAvatar = emoji;
@@ -537,7 +548,7 @@ function showScreen(name) {
 
 function showToast(msg, type = '') {
   const t = document.createElement('div');
-  t.className = `toast ${type}`;
+  t.className   = `toast ${type}`;
   t.textContent = msg;
   document.getElementById('toasts').appendChild(t);
   setTimeout(() => t.remove(), 3000);
@@ -545,8 +556,8 @@ function showToast(msg, type = '') {
 
 function getInput(id) {
   const v = document.getElementById(id).value.trim();
-  if (!v)          { showToast('Entre un pseudo !'); return null; }
-  if (v.length < 2){ showToast('Pseudo trop court (min 2 car.)'); return null; }
+  if (!v)           { showToast('Entre un pseudo !'); return null; }
+  if (v.length < 2) { showToast('Pseudo trop court (min 2 car.)'); return null; }
   return v;
 }
 
@@ -558,7 +569,8 @@ function esc(str) {
 
 // ─── Actions principales ──────────────────────────────────────
 async function createRoom() {
-  const name = getInput('input-name-create'); if (!name) return;
+  const name = getInput('input-name-create');
+  if (!name) return;
   S.myName = name;
   try {
     const data = await api('create', { playerName: name, avatar: S.myAvatar, playerId: S.playerId });
@@ -567,7 +579,8 @@ async function createRoom() {
 }
 
 async function joinRoom() {
-  const name = getInput('input-name-join'); if (!name) return;
+  const name = getInput('input-name-join');
+  if (!name) return;
   const code = document.getElementById('input-room-code').value.trim().toUpperCase();
   if (!code || code.length < 4) return showToast('Entre un code valide !');
   S.myName = name;
@@ -578,17 +591,17 @@ async function joinRoom() {
 }
 
 function initRoom(data) {
-  S.roomCode          = data.code;
-  S.hostId            = data.room.hostId;
-  S.players           = data.room.players;
-  S.config            = data.room.config;
-  S.editRoles         = [...(data.room.config.customRoles || [])];
-  S._prevPlayersHash  = null;
-  S._prevRolesHash    = null;
+  S.roomCode         = data.code;
+  S.hostId           = data.room.hostId;
+  S.players          = data.room.players;
+  S.config           = data.room.config;
+  // editRoles = config.customRoles via le getter — rien à synchroniser
+  S._prevPlayersHash = null;
+  S._prevRolesHash   = null;
   document.getElementById('lobby-code').textContent = data.code;
   showScreen('lobby');
   renderLobby();
-  startPolling();
+  startSSE();
 }
 
 async function startGame() {
@@ -603,52 +616,73 @@ async function startGame() {
 
 async function leaveRoom() {
   if (!confirm('Quitter la room ?')) return;
-  try { await api('leave', { roomCode: S.roomCode, playerId: S.playerId }); } catch(e) {}
+  try { await api('leave', { roomCode: S.roomCode, playerId: S.playerId }); } catch(_) {}
   location.reload();
 }
 
 // ─── Boot ─────────────────────────────────────────────────────
 document.addEventListener('DOMContentLoaded', () => {
 
+  // Accueil
   document.getElementById('btn-create').addEventListener('click', createRoom);
   document.getElementById('btn-join').addEventListener('click', joinRoom);
-  document.getElementById('input-name-create').addEventListener('keydown', e => { if(e.key==='Enter') createRoom(); });
-  document.getElementById('input-name-join').addEventListener('keydown', e => { if(e.key==='Enter') joinRoom(); });
-  document.getElementById('input-room-code').addEventListener('keydown', e => { if(e.key==='Enter') joinRoom(); });
+  document.getElementById('input-name-create').addEventListener('keydown', e => { if (e.key === 'Enter') createRoom(); });
+  document.getElementById('input-name-join').addEventListener('keydown',   e => { if (e.key === 'Enter') joinRoom(); });
+  document.getElementById('input-room-code').addEventListener('keydown',   e => { if (e.key === 'Enter') joinRoom(); });
   document.getElementById('avatar-create').addEventListener('click', () => openAvatarModal('create'));
-  document.getElementById('avatar-join').addEventListener('click', () => openAvatarModal('join'));
-  document.getElementById('avatar-close').addEventListener('click', () => {
+  document.getElementById('avatar-join').addEventListener('click',   () => openAvatarModal('join'));
+  document.getElementById('avatar-close').addEventListener('click',  () => {
     document.getElementById('avatar-modal').classList.add('hidden');
   });
 
+  // Lobby
   document.getElementById('btn-leave').addEventListener('click', leaveRoom);
   document.getElementById('btn-copy').addEventListener('click', () => {
-    navigator.clipboard.writeText(S.roomCode||'').then(() => showToast('Code copié !','ok'));
+    navigator.clipboard.writeText(S.roomCode || '').then(() => showToast('Code copié !', 'ok'));
   });
   document.getElementById('btn-start').addEventListener('click', startGame);
   document.getElementById('btn-add-role').addEventListener('click', addRole);
 
+  // Steppers
   document.getElementById('imp-minus').addEventListener('click', () => {
-    if (S.config.impostorCount > 1) { S.config.impostorCount--; document.getElementById('imp-val').textContent = S.config.impostorCount; saveConfig(); }
+    if (S.config.impostorCount > 1) {
+      S.config.impostorCount--;
+      document.getElementById('imp-val').textContent = S.config.impostorCount;
+      saveConfig();
+    }
   });
   document.getElementById('imp-plus').addEventListener('click', () => {
-    const max = Math.max(1, Math.floor(S.players.length/2));
-    if (S.config.impostorCount < max) { S.config.impostorCount++; document.getElementById('imp-val').textContent = S.config.impostorCount; saveConfig(); }
+    const max = Math.max(1, Math.floor(S.players.length / 2));
+    if (S.config.impostorCount < max) {
+      S.config.impostorCount++;
+      document.getElementById('imp-val').textContent = S.config.impostorCount;
+      saveConfig();
+    }
   });
   document.getElementById('timer-minus').addEventListener('click', () => {
-    if (S.config.timer > 10) { S.config.timer = Math.max(10, S.config.timer-10); document.getElementById('timer-val').textContent = S.config.timer; saveConfig(); }
+    if (S.config.timer > 10) {
+      S.config.timer = Math.max(10, S.config.timer - 10);
+      document.getElementById('timer-val').textContent = S.config.timer;
+      saveConfig();
+    }
   });
   document.getElementById('timer-plus').addEventListener('click', () => {
-    if (S.config.timer < 300) { S.config.timer = Math.min(300, S.config.timer+10); document.getElementById('timer-val').textContent = S.config.timer; saveConfig(); }
+    if (S.config.timer < 300) {
+      S.config.timer = Math.min(300, S.config.timer + 10);
+      document.getElementById('timer-val').textContent = S.config.timer;
+      saveConfig();
+    }
   });
 
+  // Jeu
   document.getElementById('btn-vote-phase').addEventListener('click', async () => {
     try { await api('vote-phase', { roomCode: S.roomCode, playerId: S.playerId }); }
     catch(e) { showToast(e.message); }
   });
   document.getElementById('btn-chat-send').addEventListener('click', sendChat);
-  document.getElementById('chat-input').addEventListener('keydown', e => { if(e.key==='Enter') sendChat(); });
+  document.getElementById('chat-input').addEventListener('keydown', e => { if (e.key === 'Enter') sendChat(); });
 
+  // Overlay rôle
   document.getElementById('btn-close-role').addEventListener('click', () => {
     document.getElementById('overlay-role').classList.add('hidden');
     showScreen('game');
@@ -657,19 +691,26 @@ document.addEventListener('DOMContentLoaded', () => {
     updatePhaseBadge(S.phase);
   });
 
+  // Overlay vote
   document.getElementById('btn-close-vote').addEventListener('click', () => {
     document.getElementById('overlay-vote').classList.add('hidden');
   });
 
+  // Résultat
   document.getElementById('btn-restart').addEventListener('click', () => {
     showScreen('lobby');
     S.phase = 'lobby';
-    startPolling();
+    startSSE();
     startGame();
   });
   document.getElementById('btn-home').addEventListener('click', () => location.reload());
 
+  // Quitter proprement
   window.addEventListener('beforeunload', () => {
-    if (S.roomCode) navigator.sendBeacon('/api/room?action=leave', JSON.stringify({ roomCode: S.roomCode, playerId: S.playerId, action: 'leave' }));
+    if (S.roomCode) {
+      navigator.sendBeacon('/api/room?action=leave',
+        JSON.stringify({ roomCode: S.roomCode, playerId: S.playerId, action: 'leave' })
+      );
+    }
   });
 });
