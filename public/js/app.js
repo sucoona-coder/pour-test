@@ -244,18 +244,21 @@ function renderLobby() {
 
 // ─── Éditeur de rôles ─────────────────────────────────────────
 function renderRolesList() {
-  const newHash = JSON.stringify(S.editRoles);
-  if (newHash === S._prevRolesHash) return;
-  S._prevRolesHash = newHash;
-
   const list = document.getElementById('roles-list');
-  const focusedInput = [...list.querySelectorAll('input[type="text"]')]
-  .find(el => el === document.activeElement);
-if (focusedInput && newHash === S._prevRolesHash) return;
-if (!focusedInput && newHash === S._prevRolesHash) return;
+  if (!list) return;
 
+  const newHash = JSON.stringify(S.config.customRoles);
+
+  // Bloque seulement si un INPUT texte est en cours de saisie
+  const activeIsInput = document.activeElement?.tagName === 'INPUT'
+    && list.contains(document.activeElement);
+  if (activeIsInput && newHash === S._prevRolesHash) return;
+  if (!activeIsInput && newHash === S._prevRolesHash) return;
+
+  S._prevRolesHash = newHash;
   list.innerHTML = '';
-  S.editRoles.forEach((r, i) => {
+
+  S.config.customRoles.forEach((r, i) => {
     const el = document.createElement('div');
     el.className = `role-item ${r.type === 'impostor' ? 'imp' : 'crew'}`;
     el.innerHTML = `
@@ -285,15 +288,16 @@ function onRoleBlur() {
   S._prevRolesHash = null;
   saveConfig();
 }
+
 function addRole() {
   S.config.customRoles.push({ name: '', description: '', type: 'crewmate' });
   S._prevRolesHash = null;
   renderRolesList();
 }
+
 function deleteRole(i) {
   S.config.customRoles.splice(i, 1);
   S._prevRolesHash = null;
-  // Recalcule les max pour éviter des valeurs hors-limite
   const maxImp  = S.config.customRoles.filter(r => r.type === 'impostor').length;
   const maxCrew = S.config.customRoles.filter(r => r.type === 'crewmate').length;
   if (S.config.specialImpCount  > maxImp)  S.config.specialImpCount  = maxImp;
@@ -301,6 +305,7 @@ function deleteRole(i) {
   renderRolesList();
   saveConfig();
 }
+
 function setRoleType(i, type) {
   S.config.customRoles[i].type = type;
   S._prevRolesHash = null;
@@ -321,7 +326,6 @@ async function saveConfig() {
     });
   } catch(_) {}
 }
-
 // ─── Joueurs en jeu ───────────────────────────────────────────
 function renderGamePlayersIfChanged() {
   const newHash = hashPlayers(S.players) + ':' + S.phase + ':' + S.hasVoted;
