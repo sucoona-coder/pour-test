@@ -27,7 +27,7 @@ const S = {
   phase:            'lobby',
   players:          [],
   messages:         [],
-  config:           { impostorCount: 1, timer: 60, customRoles: [] },
+  config:           { impostorCount: 1, timer: 60, customRoles: [], specialImpCount: 0, specialCrewCount: 0 },
   myRole:           null,
   myCustomRole:     null,
   myDesc:           null,
@@ -43,7 +43,6 @@ const S = {
   _prevPhase:       null,
 };
 
-// editRoles = alias sur config.customRoles, plus de doublon
 Object.defineProperty(S, 'editRoles', {
   get() { return this.config.customRoles; },
   set(v) { this.config.customRoles = v; }
@@ -83,7 +82,7 @@ function stopPolling() {
   if (S.pollTimer) { clearInterval(S.pollTimer); S.pollTimer = null; }
 }
 
-// ─── Hash pour détecter les vrais changements ─────────────────
+// ─── Hash ─────────────────────────────────────────────────────
 function hashPlayers(players) {
   return players.map(p =>
     `${p.id}:${p.name}:${p.avatar}:${p.isAlive}:${p.hasVoted}:${p.votedBy}:${p.isHost}`
@@ -93,13 +92,17 @@ function hashPlayers(players) {
 // ─── Application de l'état serveur ────────────────────────────
 function applyRoomState(room) {
   const prevPhase = S.phase;
-  S.hostId  = room.hostId;
-  S.phase   = room.phase;
+  S.hostId = room.hostId;
+  S.phase  = room.phase;
+
+  // Ne pas écraser customRoles / specialCounts si l'hôte est en train d'éditer
   const rolesFocused = document.getElementById('roles-list')?.contains(document.activeElement);
   S.config = rolesFocused
-    ? { ...room.config, customRoles: S.config.customRoles }
+    ? { ...room.config, customRoles: S.config.customRoles, specialImpCount: S.config.specialImpCount, specialCrewCount: S.config.specialCrewCount }
     : room.config;
+
   S.players = room.players;
+
   const me = room.players.find(p => p.id === S.playerId);
   if (me?.role && !S.myRole) {
     S.myRole       = me.role;
@@ -107,11 +110,14 @@ function applyRoomState(room) {
     S.myDesc       = me.description;
     showRoleOverlay(me.role, me.customRole, me.description);
   }
+
   if (room.messages.length > S.lastMsgCount) {
     room.messages.slice(S.lastMsgCount).forEach(appendChatMsg);
     S.lastMsgCount = room.messages.length;
   }
+
   if (prevPhase !== room.phase) handlePhaseChange(room.phase, room);
+
   if (room.phase === 'lobby') {
     renderLobby();
   } else if (room.phase === 'discussion' || room.phase === 'vote') {
@@ -193,6 +199,15 @@ function renderLobby() {
     const timerEl = document.getElementById('timer-val');
     if (impEl.textContent   !== String(S.config.impostorCount)) impEl.textContent   = String(S.config.impostorCount);
     if (timerEl.textContent !== String(S.config.timer))         timerEl.textContent = String(S.config.timer);
+
+    // Mise à jour steppers rôles spéciaux
+    const sImpEl  = document.getElementById('srole-imp-val');
+    const sCrewEl = document.getElementById('srole-crew-val');
+    const sImp    = String(S.config.specialImpCount  ?? 0);
+    const sCrew   = String(S.config.specialCrewCount ?? 0);
+    if (sImpEl.textContent  !== sImp)  sImpEl.textContent  = sImp;
+    if (sCrewEl.textContent !== sCrew) sCrewEl.textContent = sCrew;
+
     renderRolesList();
   }
 
@@ -227,7 +242,7 @@ function renderLobby() {
   });
 }
 
-// ─── Éditeur de rôles — ne touche pas aux inputs focused ──────
+// ─── Éditeur de rôles ─────────────────────────────────────────
 function renderRolesList() {
   const newHash = JSON.stringify(S.editRoles);
   if (newHash === S._prevRolesHash) return;
@@ -275,6 +290,11 @@ function addRole() {
 function deleteRole(i) {
   S.config.customRoles.splice(i, 1);
   S._prevRolesHash = null;
+  // Recalcule les max pour éviter des valeurs hors-limite
+  const maxImp  = S.config.customRoles.filter(r => r.type === 'impostor').length;
+  const maxCrew = S.config.customRoles.filter(r => r.type === 'crewmate').length;
+  if (S.config.specialImpCount  > maxImp)  S.config.specialImpCount  = maxImp;
+  if (S.config.specialCrewCount > maxCrew) S.config.specialCrewCount = maxCrew;
   renderRolesList();
   saveConfig();
 }
@@ -284,14 +304,17 @@ function setRoleType(i, type) {
   renderRolesList();
   saveConfig();
 }
+
 async function saveConfig() {
   try {
     await api('config', {
-      roomCode:      S.roomCode,
-      playerId:      S.playerId,
-      impostorCount: S.config.impostorCount,
-      timer:         S.config.timer,
-      customRoles:   S.config.customRoles
+      roomCode:         S.roomCode,
+      playerId:         S.playerId,
+      impostorCount:    S.config.impostorCount,
+      timer:            S.config.timer,
+      customRoles:      S.config.customRoles,
+      specialImpCount:  S.config.specialImpCount  ?? 0,
+      specialCrewCount: S.config.specialCrewCount ?? 0
     });
   } catch(_) {}
 }
@@ -549,6 +572,9 @@ function initRoom(data) {
   S.hostId           = data.room.hostId;
   S.players          = data.room.players;
   S.config           = data.room.config;
+  // S'assure que les champs existent
+  S.config.specialImpCount  = S.config.specialImpCount  ?? 0;
+  S.config.specialCrewCount = S.config.specialCrewCount ?? 0;
   S._prevPlayersHash = null;
   S._prevRolesHash   = null;
   document.getElementById('lobby-code').textContent = data.code;
@@ -594,6 +620,7 @@ document.addEventListener('DOMContentLoaded', () => {
   document.getElementById('btn-start').addEventListener('click', startGame);
   document.getElementById('btn-add-role').addEventListener('click', addRole);
 
+  // ── Steppers imposteurs / timer ────────────────────────────
   document.getElementById('imp-minus').addEventListener('click', () => {
     if (S.config.impostorCount > 1) {
       S.config.impostorCount--;
@@ -624,6 +651,49 @@ document.addEventListener('DOMContentLoaded', () => {
     }
   });
 
+  // ── Steppers rôles spéciaux imposteurs (min 0, max = nb rôles imp définis) ──
+  document.getElementById('srole-imp-minus').addEventListener('click', () => {
+    const cur = S.config.specialImpCount ?? 0;
+    if (cur > 0) {
+      S.config.specialImpCount = cur - 1;
+      document.getElementById('srole-imp-val').textContent = S.config.specialImpCount;
+      saveConfig();
+    }
+  });
+  document.getElementById('srole-imp-plus').addEventListener('click', () => {
+    const cur = S.config.specialImpCount ?? 0;
+    const max = S.config.customRoles.filter(r => r.type === 'impostor').length;
+    if (cur < max) {
+      S.config.specialImpCount = cur + 1;
+      document.getElementById('srole-imp-val').textContent = S.config.specialImpCount;
+      saveConfig();
+    } else {
+      showToast('Ajoute d\'abord des rôles imposteurs !');
+    }
+  });
+
+  // ── Steppers rôles spéciaux équipiers (min 0, max = nb rôles crew définis) ──
+  document.getElementById('srole-crew-minus').addEventListener('click', () => {
+    const cur = S.config.specialCrewCount ?? 0;
+    if (cur > 0) {
+      S.config.specialCrewCount = cur - 1;
+      document.getElementById('srole-crew-val').textContent = S.config.specialCrewCount;
+      saveConfig();
+    }
+  });
+  document.getElementById('srole-crew-plus').addEventListener('click', () => {
+    const cur = S.config.specialCrewCount ?? 0;
+    const max = S.config.customRoles.filter(r => r.type === 'crewmate').length;
+    if (cur < max) {
+      S.config.specialCrewCount = cur + 1;
+      document.getElementById('srole-crew-val').textContent = S.config.specialCrewCount;
+      saveConfig();
+    } else {
+      showToast('Ajoute d\'abord des rôles équipiers !');
+    }
+  });
+
+  // ── Jeu ───────────────────────────────────────────────────
   document.getElementById('btn-vote-phase').addEventListener('click', async () => {
     try { await api('vote-phase', { roomCode: S.roomCode, playerId: S.playerId }); }
     catch(e) { showToast(e.message); }
