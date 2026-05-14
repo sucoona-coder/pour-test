@@ -704,10 +704,14 @@ document.addEventListener('DOMContentLoaded', () => {
   });
 
   // Résultat
-  document.getElementById('btn-restart').addEventListener('click', () => {
+document.getElementById('btn-restart').addEventListener('click', () => {
     showScreen('lobby');
     S.phase = 'lobby';
-    startSSE();
+    if (location.hostname === 'localhost' || location.hostname === '127.0.0.1') {
+      startPollingFallback();
+    } else {
+      startSSE();
+    }
     startGame();
   });
   document.getElementById('btn-home').addEventListener('click', () => location.reload());
