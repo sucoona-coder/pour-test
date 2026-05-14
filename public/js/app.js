@@ -96,10 +96,11 @@ function applyRoomState(room) {
   S.phase  = room.phase;
 
   // Ne pas écraser customRoles / specialCounts si l'hôte est en train d'éditer
-  const rolesFocused = document.getElementById('roles-list')?.contains(document.activeElement);
-  S.config = rolesFocused
-    ? { ...room.config, customRoles: S.config.customRoles, specialImpCount: S.config.specialImpCount, specialCrewCount: S.config.specialCrewCount }
-    : room.config;
+ const activeIsInput = document.activeElement?.tagName === 'INPUT'
+  && document.getElementById('roles-list')?.contains(document.activeElement);
+S.config = activeIsInput
+  ? { ...room.config, customRoles: S.config.customRoles, specialImpCount: S.config.specialImpCount, specialCrewCount: S.config.specialCrewCount }
+  : { ...room.config, specialImpCount: room.config.specialImpCount ?? 0, specialCrewCount: room.config.specialCrewCount ?? 0 };
 
   S.players = room.players;
 
