@@ -249,7 +249,10 @@ function renderRolesList() {
   S._prevRolesHash = newHash;
 
   const list = document.getElementById('roles-list');
-  if (list && list.contains(document.activeElement)) return;
+  const focusedInput = [...list.querySelectorAll('input[type="text"]')]
+  .find(el => el === document.activeElement);
+if (focusedInput && newHash === S._prevRolesHash) return;
+if (!focusedInput && newHash === S._prevRolesHash) return;
 
   list.innerHTML = '';
   S.editRoles.forEach((r, i) => {
