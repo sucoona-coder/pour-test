@@ -96,11 +96,10 @@ function applyRoomState(room) {
   S.phase  = room.phase;
 
   // Ne pas écraser customRoles / specialCounts si l'hôte est en train d'éditer
- const activeIsInput = document.activeElement?.tagName === 'INPUT'
-  && document.getElementById('roles-list')?.contains(document.activeElement);
-S.config = activeIsInput
-  ? { ...room.config, customRoles: S.config.customRoles, specialImpCount: S.config.specialImpCount, specialCrewCount: S.config.specialCrewCount }
-  : { ...room.config, specialImpCount: room.config.specialImpCount ?? 0, specialCrewCount: room.config.specialCrewCount ?? 0 };
+  const rolesFocused = document.getElementById('roles-list')?.contains(document.activeElement);
+  S.config = rolesFocused
+    ? { ...room.config, customRoles: S.config.customRoles, specialImpCount: S.config.specialImpCount, specialCrewCount: S.config.specialCrewCount }
+    : room.config;
 
   S.players = room.players;
 
@@ -245,21 +244,15 @@ function renderLobby() {
 
 // ─── Éditeur de rôles ─────────────────────────────────────────
 function renderRolesList() {
-  const list = document.getElementById('roles-list');
-  if (!list) return;
-
-  const newHash = JSON.stringify(S.config.customRoles);
-
-  // Bloque seulement si un INPUT texte est en cours de saisie
-  const activeIsInput = document.activeElement?.tagName === 'INPUT'
-    && list.contains(document.activeElement);
-  if (activeIsInput && newHash === S._prevRolesHash) return;
-  if (!activeIsInput && newHash === S._prevRolesHash) return;
-
+  const newHash = JSON.stringify(S.editRoles);
+  if (newHash === S._prevRolesHash) return;
   S._prevRolesHash = newHash;
-  list.innerHTML = '';
 
-  S.config.customRoles.forEach((r, i) => {
+  const list = document.getElementById('roles-list');
+  if (list && list.contains(document.activeElement)) return;
+
+  list.innerHTML = '';
+  S.editRoles.forEach((r, i) => {
     const el = document.createElement('div');
     el.className = `role-item ${r.type === 'impostor' ? 'imp' : 'crew'}`;
     el.innerHTML = `
@@ -289,16 +282,15 @@ function onRoleBlur() {
   S._prevRolesHash = null;
   saveConfig();
 }
-
 function addRole() {
   S.config.customRoles.push({ name: '', description: '', type: 'crewmate' });
   S._prevRolesHash = null;
   renderRolesList();
 }
-
 function deleteRole(i) {
   S.config.customRoles.splice(i, 1);
   S._prevRolesHash = null;
+  // Recalcule les max pour éviter des valeurs hors-limite
   const maxImp  = S.config.customRoles.filter(r => r.type === 'impostor').length;
   const maxCrew = S.config.customRoles.filter(r => r.type === 'crewmate').length;
   if (S.config.specialImpCount  > maxImp)  S.config.specialImpCount  = maxImp;
@@ -306,7 +298,6 @@ function deleteRole(i) {
   renderRolesList();
   saveConfig();
 }
-
 function setRoleType(i, type) {
   S.config.customRoles[i].type = type;
   S._prevRolesHash = null;
@@ -327,6 +318,7 @@ async function saveConfig() {
     });
   } catch(_) {}
 }
+
 // ─── Joueurs en jeu ───────────────────────────────────────────
 function renderGamePlayersIfChanged() {
   const newHash = hashPlayers(S.players) + ':' + S.phase + ':' + S.hasVoted;
