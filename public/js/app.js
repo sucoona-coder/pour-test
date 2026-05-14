@@ -599,13 +599,16 @@ function initRoom(data) {
   S.hostId           = data.room.hostId;
   S.players          = data.room.players;
   S.config           = data.room.config;
-  // editRoles = config.customRoles via le getter — rien à synchroniser
   S._prevPlayersHash = null;
   S._prevRolesHash   = null;
   document.getElementById('lobby-code').textContent = data.code;
   showScreen('lobby');
   renderLobby();
-  startSSE();
+  if (location.hostname === 'localhost' || location.hostname === '127.0.0.1') {
+    startPollingFallback();
+  } else {
+    startSSE();
+  }
 }
 
 async function startGame() {
