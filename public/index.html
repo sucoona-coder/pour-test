@@ -93,10 +93,26 @@
           </div>
         </div>
         <div class="roles-section">
-          <div class="roles-header">
-            <span>🎭 Rôles personnalisés</span>
-            <button class="btn-add" id="btn-add-role">+ Ajouter</button>
-          </div>
+         <div class="roles-header">
+  <span>🎭 Rôles personnalisés</span>
+  <button class="btn-add" id="btn-add-role">+ Ajouter</button>
+</div>
+<div class="config-row" style="margin-top:4px">
+  <label>Rôles spéciaux imposteurs</label>
+  <div class="stepper">
+    <button class="step-btn" id="srole-imp-minus">−</button>
+    <span id="srole-imp-val">1</span>
+    <button class="step-btn" id="srole-imp-plus">+</button>
+  </div>
+</div>
+<div class="config-row">
+  <label>Rôles spéciaux équipiers</label>
+  <div class="stepper">
+    <button class="step-btn" id="srole-crew-minus">−</button>
+    <span id="srole-crew-val">1</span>
+    <button class="step-btn" id="srole-crew-plus">+</button>
+  </div>
+</div>
           <div id="roles-list" class="roles-list"></div>
           <p class="hint">Sans rôles → "Imposteur" / "Équipier" par défaut.</p>
         </div>
