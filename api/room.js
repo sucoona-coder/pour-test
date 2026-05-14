@@ -1,10 +1,6 @@
-// api/room.js — Toutes les actions de room en un seul endpoint
-// Action passée via ?action=xxx dans l'URL ou dans le body
-
+// api/room.js
 const { generateCode, getRoom, setRoom, deleteRoom } = require('../lib/store');
 const { roomView } = require('../lib/roomView');
-
-// ── Utilitaires ──────────────────────────────────────────────
 
 function shuffle(arr) {
   const a = [...arr];
@@ -16,46 +12,13 @@ function shuffle(arr) {
 }
 
 function checkWin(room) {
-  const alive      = Object.values(room.players).filter(p => p.isAlive);
-  const impostors  = alive.filter(p => p.role === 'impostor');
-  const crewmates  = alive.filter(p => p.role === 'crewmate');
-  if (impostors.length === 0)                  return 'crewmates';
-  if (impostors.length >= crewmates.length)    return 'impostors';
+  const alive     = Object.values(room.players).filter(p => p.isAlive);
+  const impostors = alive.filter(p => p.role === 'impostor');
+  const crewmates = alive.filter(p => p.role === 'crewmate');
+  if (impostors.length === 0)               return 'crewmates';
+  if (impostors.length >= crewmates.length) return 'impostors';
   return null;
 }
-
-// Vue publique d'un joueur (sans rôle sauf pour lui-même ou en fin de partie)
-function publicPlayer(p, room, myId) {
-  const showRole = p.id === myId || room.phase === 'result';
-  return {
-    id:          p.id,
-    name:        p.name,
-    avatar:      p.avatar,
-    isAlive:     p.isAlive,
-    hasVoted:    p.hasVoted,
-    isHost:      p.id === room.hostId,
-    role:        showRole ? p.role        : null,
-    customRole:  showRole ? p.customRole  : null,
-    description: showRole ? p.description : null,
-    votedBy:     Object.values(room.votes || {}).filter(v => v === p.id).length
-  };
-}
-
-function roomView(room, myId) {
-  return {
-    code:     room.code,
-    hostId:   room.hostId,
-    phase:    room.phase,
-    config:   room.config,
-    winner:   room.winner || null,
-    round:    room.round,
-    players:  Object.values(room.players).map(p => publicPlayer(p, room, myId)),
-    messages: room.messages || [],
-    votes:    room.phase === 'vote' ? room.votes : {}
-  };
-}
-
-// ── Handler principal ────────────────────────────────────────
 
 module.exports = async (req, res) => {
   res.setHeader('Access-Control-Allow-Origin', '*');
@@ -63,7 +26,6 @@ module.exports = async (req, res) => {
   res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
   if (req.method === 'OPTIONS') return res.status(200).end();
 
-  // GET /api/room?code=XXX&playerId=YYY → récupère l'état de la room
   if (req.method === 'GET') {
     const { code, playerId } = req.query;
     const room = getRoom(code);
@@ -76,7 +38,7 @@ module.exports = async (req, res) => {
   const body   = req.body || {};
   const action = req.query.action || body.action;
 
-  // ── CREATE ──────────────────────────────────────────────────
+  // ── CREATE ────────────────────────────────────────────────
   if (action === 'create') {
     const { playerName, avatar, playerId } = body;
     if (!playerName || !playerId) return res.status(400).json({ error: 'Champs manquants.' });
@@ -84,15 +46,11 @@ module.exports = async (req, res) => {
     const code = generateCode();
     const room = {
       code,
-      hostId:   playerId,
-      phase:    'lobby',  // lobby | role | discussion | vote | result
-      round:    0,
-      winner:   null,
-      config: {
-        impostorCount: 1,
-        timer:         60,
-        customRoles:   []   // [{ name, description, type: 'impostor'|'crewmate' }]
-      },
+      hostId:  playerId,
+      phase:   'lobby',
+      round:   0,
+      winner:  null,
+      config: { impostorCount: 1, timer: 60, customRoles: [] },
       players: {
         [playerId]: {
           id:          playerId,
@@ -113,15 +71,15 @@ module.exports = async (req, res) => {
     return res.status(200).json({ code, room: roomView(room, playerId) });
   }
 
-  // ── JOIN ────────────────────────────────────────────────────
+  // ── JOIN ──────────────────────────────────────────────────
   if (action === 'join') {
     const { roomCode, playerName, avatar, playerId } = body;
     const code = (roomCode || '').toUpperCase().trim();
     const room = getRoom(code);
 
-    if (!room)                                          return res.status(404).json({ error: 'Room introuvable.' });
-    if (room.phase !== 'lobby')                         return res.status(400).json({ error: 'Partie déjà en cours.' });
-    if (Object.keys(room.players).length >= 15)         return res.status(400).json({ error: 'Room pleine (max 15).' });
+    if (!room)                                  return res.status(404).json({ error: 'Room introuvable.' });
+    if (room.phase !== 'lobby')                 return res.status(400).json({ error: 'Partie déjà en cours.' });
+    if (Object.keys(room.players).length >= 15) return res.status(400).json({ error: 'Room pleine (max 15).' });
 
     if (!room.players[playerId]) {
       room.players[playerId] = {
@@ -141,13 +99,13 @@ module.exports = async (req, res) => {
     return res.status(200).json({ code, room: roomView(room, playerId) });
   }
 
-  // ── CONFIG (hôte seulement) ─────────────────────────────────
+  // ── CONFIG ────────────────────────────────────────────────
   if (action === 'config') {
     const { roomCode, playerId, impostorCount, timer, customRoles } = body;
     const room = getRoom(roomCode);
-    if (!room)                        return res.status(404).json({ error: 'Room introuvable.' });
-    if (room.hostId !== playerId)     return res.status(403).json({ error: 'Pas l\'hôte.' });
-    if (room.phase !== 'lobby')       return res.status(400).json({ error: 'Partie en cours.' });
+    if (!room)                    return res.status(404).json({ error: 'Room introuvable.' });
+    if (room.hostId !== playerId) return res.status(403).json({ error: 'Pas l\'hôte.' });
+    if (room.phase !== 'lobby')   return res.status(400).json({ error: 'Partie en cours.' });
 
     const max = Math.max(1, Math.floor(Object.keys(room.players).length / 2));
     room.config.impostorCount = Math.max(1, Math.min(parseInt(impostorCount) || 1, max));
@@ -168,54 +126,52 @@ module.exports = async (req, res) => {
     return res.status(200).json({ ok: true, config: room.config });
   }
 
-  // ── START ───────────────────────────────────────────────────
+  // ── START ─────────────────────────────────────────────────
   if (action === 'start') {
     const { roomCode, playerId } = body;
     const room = getRoom(roomCode);
-    if (!room)                     return res.status(404).json({ error: 'Room introuvable.' });
-    if (room.hostId !== playerId)  return res.status(403).json({ error: 'Pas l\'hôte.' });
+    if (!room)                    return res.status(404).json({ error: 'Room introuvable.' });
+    if (room.hostId !== playerId) return res.status(403).json({ error: 'Pas l\'hôte.' });
     if (Object.keys(room.players).length < 2) return res.status(400).json({ error: 'Il faut au moins 2 joueurs.' });
 
     room.round++;
-    room.phase  = 'discussion';
-    room.votes  = {};
-    room.winner = null;
+    room.phase    = 'discussion';
+    room.votes    = {};
+    room.winner   = null;
     room.messages = [];
 
-    const ids            = shuffle(Object.keys(room.players));
+    const ids           = shuffle(Object.keys(room.players));
     const { impostorCount, customRoles } = room.config;
-    const impostorRoles  = (customRoles || []).filter(r => r.type === 'impostor');
-    const crewmateRoles  = (customRoles || []).filter(r => r.type === 'crewmate');
+    const impostorRoles = (customRoles || []).filter(r => r.type === 'impostor');
+    const crewmateRoles = (customRoles || []).filter(r => r.type === 'crewmate');
     let ii = 0, ci = 0;
 
     ids.forEach((id, idx) => {
-      const p         = room.players[id];
-      const isImp     = idx < impostorCount;
-      p.role          = isImp ? 'impostor' : 'crewmate';
-      p.isAlive       = true;
-      p.hasVoted      = false;
+      const p     = room.players[id];
+      const isImp = idx < impostorCount;
+      p.role      = isImp ? 'impostor' : 'crewmate';
+      p.isAlive   = true;
+      p.hasVoted  = false;
 
       if (isImp) {
-        const cr        = impostorRoles[ii % (impostorRoles.length || 1)];
-        p.customRole    = impostorRoles.length ? cr.name        : 'Imposteur';
-        p.description   = impostorRoles.length ? cr.description : '🔪 Élimine les équipiers sans te faire repérer.';
+        const cr      = impostorRoles[ii % (impostorRoles.length || 1)];
+        p.customRole  = impostorRoles.length ? cr.name        : 'Imposteur';
+        p.description = impostorRoles.length ? cr.description : '🔪 Élimine les équipiers sans te faire repérer.';
         ii++;
       } else {
-        const cr        = crewmateRoles[ci % (crewmateRoles.length || 1)];
-        p.customRole    = crewmateRoles.length ? cr.name        : 'Équipier';
-        p.description   = crewmateRoles.length ? cr.description : '🔍 Trouve et vote contre l\'imposteur.';
+        const cr      = crewmateRoles[ci % (crewmateRoles.length || 1)];
+        p.customRole  = crewmateRoles.length ? cr.name        : 'Équipier';
+        p.description = crewmateRoles.length ? cr.description : '🔍 Trouve et vote contre l\'imposteur.';
         ci++;
       }
     });
 
-    // Timer de fin stocké côté serveur
     room.timerEnd = Date.now() + room.config.timer * 1000;
-
     setRoom(roomCode, room);
     return res.status(200).json({ ok: true, room: roomView(room, playerId) });
   }
 
-  // ── VOTE PHASE ──────────────────────────────────────────────
+  // ── VOTE PHASE ────────────────────────────────────────────
   if (action === 'vote-phase') {
     const { roomCode, playerId } = body;
     const room = getRoom(roomCode);
@@ -230,11 +186,11 @@ module.exports = async (req, res) => {
     return res.status(200).json({ ok: true });
   }
 
-  // ── CAST VOTE ───────────────────────────────────────────────
+  // ── CAST VOTE ─────────────────────────────────────────────
   if (action === 'vote') {
     const { roomCode, playerId, targetId } = body;
     const room = getRoom(roomCode);
-    if (!room)                return res.status(404).json({ error: 'Room introuvable.' });
+    if (!room)                 return res.status(404).json({ error: 'Room introuvable.' });
     if (room.phase !== 'vote') return res.status(400).json({ error: 'Pas en phase vote.' });
 
     const voter  = room.players[playerId];
@@ -245,37 +201,29 @@ module.exports = async (req, res) => {
     room.votes[playerId] = targetId;
     voter.hasVoted       = true;
 
-    // Vérifie si tout le monde a voté
-    const alive      = Object.values(room.players).filter(p => p.isAlive);
-    const allVoted   = alive.every(p => p.hasVoted);
-
+    const alive    = Object.values(room.players).filter(p => p.isAlive);
+    const allVoted = alive.every(p => p.hasVoted);
     let eliminated = null;
     let tie        = false;
 
     if (allVoted) {
-      // Calcule le résultat
       const counts = {};
       alive.forEach(p => { counts[p.id] = 0; });
       Object.values(room.votes).forEach(tid => { if (counts[tid] !== undefined) counts[tid]++; });
 
       let max = 0;
       for (const [id, count] of Object.entries(counts)) {
-        if (count > max)          { max = count; eliminated = id; tie = false; }
+        if (count > max)                   { max = count; eliminated = id; tie = false; }
         else if (count === max && max > 0) { tie = true; }
       }
 
       if (!tie && eliminated) {
         room.players[eliminated].isAlive = false;
-        room.messages.push({
-          type: 'system',
-          text: `${room.players[eliminated].name} a été éliminé (${room.players[eliminated].customRole})`,
-          ts: Date.now()
-        });
+        room.messages.push({ type: 'system', text: `${room.players[eliminated].name} a été éliminé (${room.players[eliminated].customRole})`, ts: Date.now() });
       } else {
         room.messages.push({ type: 'system', text: 'Égalité — personne n\'est éliminé.', ts: Date.now() });
       }
 
-      // Vérifie victoire
       const winner = checkWin(room);
       if (winner) {
         room.phase  = 'result';
@@ -303,7 +251,7 @@ module.exports = async (req, res) => {
     });
   }
 
-  // ── CHAT ────────────────────────────────────────────────────
+  // ── CHAT ──────────────────────────────────────────────────
   if (action === 'chat') {
     const { roomCode, playerId, text } = body;
     const room = getRoom(roomCode);
@@ -313,8 +261,8 @@ module.exports = async (req, res) => {
     if (!player) return res.status(403).json({ error: 'Joueur inconnu.' });
 
     room.messages.push({
-      type:   'player',
-      id:     Date.now() + Math.random(),
+      type:         'player',
+      id:           Date.now() + Math.random(),
       senderId:     playerId,
       senderName:   player.name,
       senderAvatar: player.avatar,
@@ -323,13 +271,12 @@ module.exports = async (req, res) => {
       ts:           Date.now()
     });
 
-    // Garde les 100 derniers messages
     if (room.messages.length > 100) room.messages = room.messages.slice(-100);
     setRoom(roomCode, room);
     return res.status(200).json({ ok: true });
   }
 
-  // ── LEAVE ───────────────────────────────────────────────────
+  // ── LEAVE ─────────────────────────────────────────────────
   if (action === 'leave') {
     const { roomCode, playerId } = body;
     const room = getRoom(roomCode);
