@@ -73,9 +73,12 @@
       <div id="players-grid" class="players-grid"></div>
     </div>
     <div class="lobby-right">
+
       <!-- Panel hôte -->
       <div id="host-panel" class="panel hidden">
         <h2 class="section-title">⚙️ Configuration</h2>
+
+        <!-- Nombre d'imposteurs -->
         <div class="config-row">
           <label>Imposteurs</label>
           <div class="stepper">
@@ -84,6 +87,8 @@
             <button class="step-btn" id="imp-plus">+</button>
           </div>
         </div>
+
+        <!-- Timer -->
         <div class="config-row">
           <label>Timer (secondes)</label>
           <div class="stepper">
@@ -92,32 +97,41 @@
             <button class="step-btn" id="timer-plus">+</button>
           </div>
         </div>
+
+        <!-- Rôles personnalisés -->
         <div class="roles-section">
-         <div class="roles-header">
-  <span>🎭 Rôles personnalisés</span>
-  <button class="btn-add" id="btn-add-role">+ Ajouter</button>
-</div>
-<div class="config-row" style="margin-top:4px">
-  <label>Rôles spéciaux imposteurs</label>
-  <div class="stepper">
-    <button class="step-btn" id="srole-imp-minus">−</button>
-    <span id="srole-imp-val">1</span>
-    <button class="step-btn" id="srole-imp-plus">+</button>
-  </div>
-</div>
-<div class="config-row">
-  <label>Rôles spéciaux équipiers</label>
-  <div class="stepper">
-    <button class="step-btn" id="srole-crew-minus">−</button>
-    <span id="srole-crew-val">1</span>
-    <button class="step-btn" id="srole-crew-plus">+</button>
-  </div>
-</div>
+          <div class="roles-header">
+            <span>🎭 Rôles personnalisés</span>
+            <button class="btn-add" id="btn-add-role">+ Ajouter</button>
+          </div>
           <div id="roles-list" class="roles-list"></div>
           <p class="hint">Sans rôles → "Imposteur" / "Équipier" par défaut.</p>
+
+          <!-- Rôles spéciaux imposteurs -->
+          <div class="config-row" style="margin-top:10px">
+            <label style="color:var(--accent)">🔴 Rôles imp. actifs</label>
+            <div class="stepper">
+              <button class="step-btn" id="srole-imp-minus">−</button>
+              <span id="srole-imp-val">0</span>
+              <button class="step-btn" id="srole-imp-plus">+</button>
+            </div>
+          </div>
+
+          <!-- Rôles spéciaux équipiers -->
+          <div class="config-row">
+            <label style="color:var(--cyan)">🔵 Rôles éq. actifs</label>
+            <div class="stepper">
+              <button class="step-btn" id="srole-crew-minus">−</button>
+              <span id="srole-crew-val">0</span>
+              <button class="step-btn" id="srole-crew-plus">+</button>
+            </div>
+          </div>
+          <p class="hint">Nombre de rôles spéciaux distribués par équipe.</p>
         </div>
+
         <button class="btn btn-primary btn-launch" id="btn-start">🚀 Lancer la partie</button>
       </div>
+
       <!-- Attente -->
       <div id="waiting-panel" class="panel hidden">
         <div class="waiting-anim"><span></span><span></span><span></span></div>
