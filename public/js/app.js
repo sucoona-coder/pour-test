@@ -1,6 +1,5 @@
 // ============================================================
-// app.js — Client avec SSE (remplace polling), diff DOM,
-//          playerId signé (cookie), et editRoles unifié
+// app.js — Polling 2s, diff DOM, editRoles unifié
 // ============================================================
 
 const AVATARS = [
@@ -10,9 +9,6 @@ const AVATARS = [
   '🍎','🍕','🎮','💀','👁️','🌙','⚡','🔥'
 ];
 
-// ─── playerId — cookie signé côté client ──────────────────────
-// Le serveur doit vérifier que le cookie correspond au playerId envoyé.
-// Si tu utilises JWT : génère un token au create/join et stocke-le ici.
 function getOrCreateId() {
   let id = localStorage.getItem('_pid');
   if (!id) {
@@ -22,7 +18,6 @@ function getOrCreateId() {
   return id;
 }
 
-// ─── État global ──────────────────────────────────────────────
 const S = {
   playerId:         getOrCreateId(),
   myName:           null,
@@ -32,26 +27,23 @@ const S = {
   phase:            'lobby',
   players:          [],
   messages:         [],
-  // config + editRoles sont la MÊME source de vérité
-  // editRoles est toujours config.customRoles (plus de doublon)
   config:           { impostorCount: 1, timer: 60, customRoles: [] },
   myRole:           null,
   myCustomRole:     null,
   myDesc:           null,
   hasVoted:         false,
-  sseSource:        null,   // EventSource SSE
+  pollTimer:        null,
   clientTimer:      null,
   timerMax:         60,
   timerValue:       0,
   lastMsgCount:     0,
   avatarTarget:     null,
-  // Hashes pour le diff DOM
   _prevPlayersHash: null,
   _prevRolesHash:   null,
   _prevPhase:       null,
 };
 
-// editRoles est un alias direct sur config.customRoles → plus de désynchronisation
+// editRoles = alias sur config.customRoles, plus de doublon
 Object.defineProperty(S, 'editRoles', {
   get() { return this.config.customRoles; },
   set(v) { this.config.customRoles = v; }
@@ -60,10 +52,9 @@ Object.defineProperty(S, 'editRoles', {
 // ─── API ──────────────────────────────────────────────────────
 async function api(action, body = {}) {
   const r = await fetch(`/api/room?action=${action}`, {
-    method:      'POST',
-    credentials: 'include',
-    headers:     { 'Content-Type': 'application/json' },
-    body:        JSON.stringify({ ...body, action })
+    method:  'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body:    JSON.stringify({ ...body, action })
   });
   const data = await r.json();
   if (!r.ok) throw new Error(data.error || 'Erreur serveur');
@@ -71,59 +62,28 @@ async function api(action, body = {}) {
 }
 
 async function getRoomHttp() {
-  const r = await fetch(`/api/room?code=${S.roomCode}&playerId=${S.playerId}`, {
-    credentials: 'include'
-  });
+  const r = await fetch(`/api/room?code=${S.roomCode}&playerId=${S.playerId}`);
   if (!r.ok) return null;
   return r.json();
 }
 
-// ─── SSE — remplace le polling ────────────────────────────────
-// Le serveur expose GET /api/stream?code=XXX&playerId=YYY
-// et envoie `data: <JSON>\n\n` à chaque changement de room.
-// Fallback automatique sur polling si SSE indisponible.
-function startSSE() {
-  stopSSE();
-  const url = `/api/stream?code=${S.roomCode}&playerId=${S.playerId}`;
-  try {
-    const es = new EventSource(url);
-    es.onmessage = (e) => {
-      try {
-        const data = JSON.parse(e.data);
-        if (data.error) return;
-        applyRoomState(data);
-      } catch(_) {}
-    };
-    es.onerror = () => {
-      es.close();
-      S.sseSource = null;
-      startPollingFallback();
-    };
-    S.sseSource = es;
-  } catch(_) {
-    startPollingFallback();
-  }
-}
-
-function stopSSE() {
-  if (S.sseSource) { S.sseSource.close(); S.sseSource = null; }
-  stopPollingFallback();
-}
-
-// ─── Polling fallback (si SSE non dispo) ──────────────────────
-let _pollTimer = null;
-function startPollingFallback() {
-  stopPollingFallback();
-  _pollTimer = setInterval(async () => {
+// ─── Polling ──────────────────────────────────────────────────
+function startPolling() {
+  stopPolling();
+  S.pollTimer = setInterval(async () => {
     if (!S.roomCode) return;
-    try { const room = await getRoomHttp(); if (room) applyRoomState(room); } catch(_) {}
+    try {
+      const room = await getRoomHttp();
+      if (room) applyRoomState(room);
+    } catch(_) {}
   }, 2000);
 }
-function stopPollingFallback() {
-  if (_pollTimer) { clearInterval(_pollTimer); _pollTimer = null; }
+
+function stopPolling() {
+  if (S.pollTimer) { clearInterval(S.pollTimer); S.pollTimer = null; }
 }
 
-// ─── Hash rapide pour détecter les vrais changements ──────────
+// ─── Hash pour détecter les vrais changements ─────────────────
 function hashPlayers(players) {
   return players.map(p =>
     `${p.id}:${p.name}:${p.avatar}:${p.isAlive}:${p.hasVoted}:${p.votedBy}:${p.isHost}`
@@ -185,7 +145,7 @@ function handlePhaseChange(newPhase, room) {
   }
 }
 
-// ─── Timer client ─────────────────────────────────────────────
+// ─── Timer ────────────────────────────────────────────────────
 function syncTimer(timerEnd, phase) {
   const remaining = Math.max(0, Math.round((timerEnd - Date.now()) / 1000));
   const max = phase === 'vote' ? 30 : S.config.timer;
@@ -218,7 +178,7 @@ function updateTimerUI(val, max) {
   document.getElementById('timer-display').style.color = urgent ? 'var(--gold)' : 'var(--accent)';
 }
 
-// ─── Lobby — diff DOM, jamais de flash ────────────────────────
+// ─── Lobby ────────────────────────────────────────────────────
 function renderLobby() {
   const isHost = S.playerId === S.hostId;
   document.getElementById('host-panel').classList.toggle('hidden', !isHost);
@@ -226,16 +186,14 @@ function renderLobby() {
   document.getElementById('host-game-controls').classList.toggle('hidden', !isHost);
 
   const countEl = document.getElementById('player-count');
-  const newCount = String(S.players.length);
-  if (countEl.textContent !== newCount) countEl.textContent = newCount;
+  if (countEl.textContent !== String(S.players.length))
+    countEl.textContent = String(S.players.length);
 
   if (isHost) {
-    const impEl    = document.getElementById('imp-val');
-    const timerEl  = document.getElementById('timer-val');
-    const impStr   = String(S.config.impostorCount);
-    const timerStr = String(S.config.timer);
-    if (impEl.textContent   !== impStr)   impEl.textContent   = impStr;
-    if (timerEl.textContent !== timerStr) timerEl.textContent = timerStr;
+    const impEl   = document.getElementById('imp-val');
+    const timerEl = document.getElementById('timer-val');
+    if (impEl.textContent   !== String(S.config.impostorCount)) impEl.textContent   = String(S.config.impostorCount);
+    if (timerEl.textContent !== String(S.config.timer))         timerEl.textContent = String(S.config.timer);
     renderRolesList();
   }
 
@@ -245,7 +203,6 @@ function renderLobby() {
 
   const grid   = document.getElementById('players-grid');
   const newIds = new Set(S.players.map(p => p.id));
-
   [...grid.children].forEach(el => { if (!newIds.has(el.dataset.pid)) el.remove(); });
 
   S.players.forEach(p => {
@@ -266,8 +223,7 @@ function renderLobby() {
     } else {
       if (el.className !== newClass) el.className = newClass;
       const trimmed = el.innerHTML.replace(/\s+/g, ' ').trim();
-      const target  = html.replace(/\s+/g, ' ').trim();
-      if (trimmed !== target) el.innerHTML = html;
+      if (trimmed !== html.replace(/\s+/g, ' ').trim()) el.innerHTML = html;
     }
   });
 }
@@ -279,7 +235,6 @@ function renderRolesList() {
   S._prevRolesHash = newHash;
 
   const list = document.getElementById('roles-list');
-  // Si un input de la liste a le focus → on reporte pour éviter le saut curseur
   if (list && list.contains(document.activeElement)) return;
 
   list.innerHTML = '';
@@ -309,12 +264,10 @@ function renderRolesList() {
   });
 }
 
-// Appelé quand un input de rôle perd le focus
 function onRoleBlur() {
-  S._prevRolesHash = null;   // invalide le cache → prochain renderRolesList peut tourner
+  S._prevRolesHash = null;
   saveConfig();
 }
-
 function addRole() {
   S.config.customRoles.push({ name: '', description: '', type: 'crewmate' });
   S._prevRolesHash = null;
@@ -332,7 +285,6 @@ function setRoleType(i, type) {
   renderRolesList();
   saveConfig();
 }
-
 async function saveConfig() {
   try {
     await api('config', {
@@ -345,7 +297,7 @@ async function saveConfig() {
   } catch(_) {}
 }
 
-// ─── Joueurs en jeu — diff par hash ───────────────────────────
+// ─── Joueurs en jeu ───────────────────────────────────────────
 function renderGamePlayersIfChanged() {
   const newHash = hashPlayers(S.players) + ':' + S.phase + ':' + S.hasVoted;
   if (newHash === S._prevPlayersHash) return;
@@ -388,8 +340,7 @@ function renderGamePlayers() {
     } else {
       if (el.className !== classes) el.className = classes;
       const trimmed = el.innerHTML.replace(/\s+/g, ' ').trim();
-      const target  = html.replace(/\s+/g, ' ').trim();
-      if (trimmed !== target) el.innerHTML = html;
+      if (trimmed !== html.replace(/\s+/g, ' ').trim()) el.innerHTML = html;
     }
     el.onclick = canVote ? () => doVote(p.id) : null;
   });
@@ -461,7 +412,7 @@ function showVoteResult(tie, eliminated) {
 // ─── Résultat final ───────────────────────────────────────────
 function showResultScreen(winner, players, hostId) {
   S.hostId = hostId;
-  stopSSE();
+  stopPolling();
   stopClientTimer();
   document.getElementById('result-emoji').textContent = winner === 'crewmates' ? '🎉' : '🔪';
   const title = document.getElementById('result-title');
@@ -604,11 +555,7 @@ function initRoom(data) {
   document.getElementById('lobby-code').textContent = data.code;
   showScreen('lobby');
   renderLobby();
-  if (location.hostname === 'localhost' || location.hostname === '127.0.0.1') {
-    startPollingFallback();
-  } else {
-    startSSE();
-  }
+  startPolling();
 }
 
 async function startGame() {
@@ -630,7 +577,6 @@ async function leaveRoom() {
 // ─── Boot ─────────────────────────────────────────────────────
 document.addEventListener('DOMContentLoaded', () => {
 
-  // Accueil
   document.getElementById('btn-create').addEventListener('click', createRoom);
   document.getElementById('btn-join').addEventListener('click', joinRoom);
   document.getElementById('input-name-create').addEventListener('keydown', e => { if (e.key === 'Enter') createRoom(); });
@@ -642,7 +588,6 @@ document.addEventListener('DOMContentLoaded', () => {
     document.getElementById('avatar-modal').classList.add('hidden');
   });
 
-  // Lobby
   document.getElementById('btn-leave').addEventListener('click', leaveRoom);
   document.getElementById('btn-copy').addEventListener('click', () => {
     navigator.clipboard.writeText(S.roomCode || '').then(() => showToast('Code copié !', 'ok'));
@@ -650,7 +595,6 @@ document.addEventListener('DOMContentLoaded', () => {
   document.getElementById('btn-start').addEventListener('click', startGame);
   document.getElementById('btn-add-role').addEventListener('click', addRole);
 
-  // Steppers
   document.getElementById('imp-minus').addEventListener('click', () => {
     if (S.config.impostorCount > 1) {
       S.config.impostorCount--;
@@ -681,7 +625,6 @@ document.addEventListener('DOMContentLoaded', () => {
     }
   });
 
-  // Jeu
   document.getElementById('btn-vote-phase').addEventListener('click', async () => {
     try { await api('vote-phase', { roomCode: S.roomCode, playerId: S.playerId }); }
     catch(e) { showToast(e.message); }
@@ -689,7 +632,6 @@ document.addEventListener('DOMContentLoaded', () => {
   document.getElementById('btn-chat-send').addEventListener('click', sendChat);
   document.getElementById('chat-input').addEventListener('keydown', e => { if (e.key === 'Enter') sendChat(); });
 
-  // Overlay rôle
   document.getElementById('btn-close-role').addEventListener('click', () => {
     document.getElementById('overlay-role').classList.add('hidden');
     showScreen('game');
@@ -698,25 +640,18 @@ document.addEventListener('DOMContentLoaded', () => {
     updatePhaseBadge(S.phase);
   });
 
-  // Overlay vote
   document.getElementById('btn-close-vote').addEventListener('click', () => {
     document.getElementById('overlay-vote').classList.add('hidden');
   });
 
-  // Résultat
-document.getElementById('btn-restart').addEventListener('click', () => {
+  document.getElementById('btn-restart').addEventListener('click', () => {
     showScreen('lobby');
     S.phase = 'lobby';
-    if (location.hostname === 'localhost' || location.hostname === '127.0.0.1') {
-      startPollingFallback();
-    } else {
-      startSSE();
-    }
+    startPolling();
     startGame();
   });
   document.getElementById('btn-home').addEventListener('click', () => location.reload());
 
-  // Quitter proprement
   window.addEventListener('beforeunload', () => {
     if (S.roomCode) {
       navigator.sendBeacon('/api/room?action=leave',
