@@ -2,6 +2,7 @@
 // Action passée via ?action=xxx dans l'URL ou dans le body
 
 const { generateCode, getRoom, setRoom, deleteRoom } = require('../lib/store');
+const { roomView } = require('../lib/roomView');
 
 // ── Utilitaires ──────────────────────────────────────────────
 
