@@ -88,7 +88,11 @@ function startSSE() {
   try {
     const es = new EventSource(url);
     es.onmessage = (e) => {
-      try { applyRoomState(JSON.parse(e.data)); } catch(_) {}
+      try {
+        const data = JSON.parse(e.data);
+        if (data.error) return;
+        applyRoomState(data);
+      } catch(_) {}
     };
     es.onerror = () => {
       es.close();
