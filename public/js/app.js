@@ -95,9 +95,11 @@ function applyRoomState(room) {
   const prevPhase = S.phase;
   S.hostId  = room.hostId;
   S.phase   = room.phase;
-  S.config  = room.config;
+  const rolesFocused = document.getElementById('roles-list')?.contains(document.activeElement);
+  S.config = rolesFocused
+    ? { ...room.config, customRoles: S.config.customRoles }
+    : room.config;
   S.players = room.players;
-
   const me = room.players.find(p => p.id === S.playerId);
   if (me?.role && !S.myRole) {
     S.myRole       = me.role;
@@ -105,14 +107,11 @@ function applyRoomState(room) {
     S.myDesc       = me.description;
     showRoleOverlay(me.role, me.customRole, me.description);
   }
-
   if (room.messages.length > S.lastMsgCount) {
     room.messages.slice(S.lastMsgCount).forEach(appendChatMsg);
     S.lastMsgCount = room.messages.length;
   }
-
   if (prevPhase !== room.phase) handlePhaseChange(room.phase, room);
-
   if (room.phase === 'lobby') {
     renderLobby();
   } else if (room.phase === 'discussion' || room.phase === 'vote') {
