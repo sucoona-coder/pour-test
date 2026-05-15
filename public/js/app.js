@@ -48,6 +48,15 @@ Object.defineProperty(S, 'editRoles', {
   set(v) { this.config.customRoles = v; }
 });
 
+// ─── Helpers counts ───────────────────────────────────────────
+// Clamp les specialCounts pour qu'ils ne dépassent jamais le nb de rôles dispo
+function clampSpecialCounts() {
+  const maxImp  = S.config.customRoles.filter(r => r.type === 'impostor').length;
+  const maxCrew = S.config.customRoles.filter(r => r.type === 'crewmate').length;
+  if ((S.config.specialImpCount  || 0) > maxImp)  S.config.specialImpCount  = maxImp;
+  if ((S.config.specialCrewCount || 0) > maxCrew) S.config.specialCrewCount = maxCrew;
+}
+
 // ─── API ──────────────────────────────────────────────────────
 async function api(action, body = {}) {
   const r = await fetch(`/api/room?action=${action}`, {
@@ -95,11 +104,31 @@ function applyRoomState(room) {
   S.hostId = room.hostId;
   S.phase  = room.phase;
 
-  // Ne pas écraser customRoles / specialCounts si l'hôte est en train d'éditer
+  // Sauvegarde les valeurs locales avant d'écraser
+  const localRoles     = S.config.customRoles;
+  const localSpecialImp  = S.config.specialImpCount  ?? 0;
+  const localSpecialCrew = S.config.specialCrewCount ?? 0;
+
+  // Vérifie si un input de rôle a le focus
   const rolesFocused = document.getElementById('roles-list')?.contains(document.activeElement);
-  S.config = rolesFocused
-    ? { ...room.config, customRoles: S.config.customRoles, specialImpCount: S.config.specialImpCount, specialCrewCount: S.config.specialCrewCount }
-    : room.config;
+
+  if (rolesFocused) {
+    // Garde tout local pendant l'édition
+    S.config = {
+      ...room.config,
+      customRoles:      localRoles,
+      specialImpCount:  localSpecialImp,
+      specialCrewCount: localSpecialCrew
+    };
+  } else {
+    // Applique la config serveur mais garde les specialCounts locaux
+    // (ils ne sont sauvegardés qu'au clic stepper, pas besoin de les écraser)
+    S.config = {
+      ...room.config,
+      specialImpCount:  room.config.specialImpCount  ?? localSpecialImp,
+      specialCrewCount: room.config.specialCrewCount ?? localSpecialCrew
+    };
+  }
 
   S.players = room.players;
 
@@ -200,7 +229,6 @@ function renderLobby() {
     if (impEl.textContent   !== String(S.config.impostorCount)) impEl.textContent   = String(S.config.impostorCount);
     if (timerEl.textContent !== String(S.config.timer))         timerEl.textContent = String(S.config.timer);
 
-    // Mise à jour steppers rôles spéciaux
     const sImpEl  = document.getElementById('srole-imp-val');
     const sCrewEl = document.getElementById('srole-crew-val');
     const sImp    = String(S.config.specialImpCount  ?? 0);
@@ -282,25 +310,31 @@ function onRoleBlur() {
   S._prevRolesHash = null;
   saveConfig();
 }
+
 function addRole() {
   S.config.customRoles.push({ name: '', description: '', type: 'crewmate' });
   S._prevRolesHash = null;
   renderRolesList();
 }
+
 function deleteRole(i) {
   S.config.customRoles.splice(i, 1);
   S._prevRolesHash = null;
-  // Recalcule les max pour éviter des valeurs hors-limite
-  const maxImp  = S.config.customRoles.filter(r => r.type === 'impostor').length;
-  const maxCrew = S.config.customRoles.filter(r => r.type === 'crewmate').length;
-  if (S.config.specialImpCount  > maxImp)  S.config.specialImpCount  = maxImp;
-  if (S.config.specialCrewCount > maxCrew) S.config.specialCrewCount = maxCrew;
+  clampSpecialCounts();
+  // Met à jour l'affichage des steppers
+  document.getElementById('srole-imp-val').textContent  = String(S.config.specialImpCount  ?? 0);
+  document.getElementById('srole-crew-val').textContent = String(S.config.specialCrewCount ?? 0);
   renderRolesList();
   saveConfig();
 }
+
 function setRoleType(i, type) {
   S.config.customRoles[i].type = type;
   S._prevRolesHash = null;
+  clampSpecialCounts();
+  // Met à jour l'affichage des steppers immédiatement
+  document.getElementById('srole-imp-val').textContent  = String(S.config.specialImpCount  ?? 0);
+  document.getElementById('srole-crew-val').textContent = String(S.config.specialCrewCount ?? 0);
   renderRolesList();
   saveConfig();
 }
@@ -572,7 +606,6 @@ function initRoom(data) {
   S.hostId           = data.room.hostId;
   S.players          = data.room.players;
   S.config           = data.room.config;
-  // S'assure que les champs existent
   S.config.specialImpCount  = S.config.specialImpCount  ?? 0;
   S.config.specialCrewCount = S.config.specialCrewCount ?? 0;
   S._prevPlayersHash = null;
@@ -620,7 +653,7 @@ document.addEventListener('DOMContentLoaded', () => {
   document.getElementById('btn-start').addEventListener('click', startGame);
   document.getElementById('btn-add-role').addEventListener('click', addRole);
 
-  // ── Steppers imposteurs / timer ────────────────────────────
+  // ── Steppers imposteurs / timer ───────────────────────────
   document.getElementById('imp-minus').addEventListener('click', () => {
     if (S.config.impostorCount > 1) {
       S.config.impostorCount--;
@@ -651,7 +684,7 @@ document.addEventListener('DOMContentLoaded', () => {
     }
   });
 
-  // ── Steppers rôles spéciaux imposteurs (min 0, max = nb rôles imp définis) ──
+  // ── Stepper rôles spéciaux imposteurs (min 0, max = nb rôles imp) ──
   document.getElementById('srole-imp-minus').addEventListener('click', () => {
     const cur = S.config.specialImpCount ?? 0;
     if (cur > 0) {
@@ -663,16 +696,15 @@ document.addEventListener('DOMContentLoaded', () => {
   document.getElementById('srole-imp-plus').addEventListener('click', () => {
     const cur = S.config.specialImpCount ?? 0;
     const max = S.config.customRoles.filter(r => r.type === 'impostor').length;
+    if (max === 0) return showToast('Ajoute d\'abord des rôles imposteurs !');
     if (cur < max) {
       S.config.specialImpCount = cur + 1;
       document.getElementById('srole-imp-val').textContent = S.config.specialImpCount;
       saveConfig();
-    } else {
-      showToast('Ajoute d\'abord des rôles imposteurs !');
     }
   });
 
-  // ── Steppers rôles spéciaux équipiers (min 0, max = nb rôles crew définis) ──
+  // ── Stepper rôles spéciaux équipiers (min 0, max = nb rôles crew) ──
   document.getElementById('srole-crew-minus').addEventListener('click', () => {
     const cur = S.config.specialCrewCount ?? 0;
     if (cur > 0) {
@@ -684,16 +716,15 @@ document.addEventListener('DOMContentLoaded', () => {
   document.getElementById('srole-crew-plus').addEventListener('click', () => {
     const cur = S.config.specialCrewCount ?? 0;
     const max = S.config.customRoles.filter(r => r.type === 'crewmate').length;
+    if (max === 0) return showToast('Ajoute d\'abord des rôles équipiers !');
     if (cur < max) {
       S.config.specialCrewCount = cur + 1;
       document.getElementById('srole-crew-val').textContent = S.config.specialCrewCount;
       saveConfig();
-    } else {
-      showToast('Ajoute d\'abord des rôles équipiers !');
     }
   });
 
-  // ── Jeu ───────────────────────────────────────────────────
+  // ── Jeu ──────────────────────────────────────────────────
   document.getElementById('btn-vote-phase').addEventListener('click', async () => {
     try { await api('vote-phase', { roomCode: S.roomCode, playerId: S.playerId }); }
     catch(e) { showToast(e.message); }
