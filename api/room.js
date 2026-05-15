@@ -20,14 +20,21 @@ function checkWin(room) {
   return null;
 }
 
+function defaultConfig() {
+  return { impostorCount: 1, timer: 60, customRoles: [], specialImpCount: 0, specialCrewCount: 0 };
+}
+
 module.exports = async (req, res) => {
   res.setHeader('Access-Control-Allow-Origin', '*');
   res.setHeader('Access-Control-Allow-Methods', 'GET,POST,OPTIONS');
   res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
   if (req.method === 'OPTIONS') return res.status(200).end();
 
+  // ── GET — état de la room ─────────────────────────────────
   if (req.method === 'GET') {
     const { code, playerId } = req.query;
+    // favicon & autres ressources statiques
+    if (!code) return res.status(404).end();
     const room = getRoom(code);
     if (!room) return res.status(404).json({ error: 'Room introuvable.' });
     return res.status(200).json(roomView(room, playerId));
@@ -46,11 +53,11 @@ module.exports = async (req, res) => {
     const code = generateCode();
     const room = {
       code,
-      hostId:  playerId,
-      phase:   'lobby',
-      round:   0,
-      winner:  null,
-      config: { impostorCount: 1, timer: 60, customRoles: [] },
+      hostId:   playerId,
+      phase:    'lobby',
+      round:    0,
+      winner:   null,
+      config:   defaultConfig(),
       players: {
         [playerId]: {
           id:          playerId,
@@ -101,16 +108,17 @@ module.exports = async (req, res) => {
 
   // ── CONFIG ────────────────────────────────────────────────
   if (action === 'config') {
-    const { roomCode, playerId, impostorCount, timer, customRoles } = body;
+    const { roomCode, playerId, impostorCount, timer, customRoles, specialImpCount, specialCrewCount } = body;
     const room = getRoom(roomCode);
     if (!room)                    return res.status(404).json({ error: 'Room introuvable.' });
     if (room.hostId !== playerId) return res.status(403).json({ error: 'Pas l\'hôte.' });
     if (room.phase !== 'lobby')   return res.status(400).json({ error: 'Partie en cours.' });
 
-    const max = Math.max(1, Math.floor(Object.keys(room.players).length / 2));
-    room.config.impostorCount = Math.max(1, Math.min(parseInt(impostorCount) || 1, max));
+    const maxImp = Math.max(1, Math.floor(Object.keys(room.players).length / 2));
+    room.config.impostorCount = Math.max(1, Math.min(parseInt(impostorCount) || 1, maxImp));
     room.config.timer         = Math.max(10, Math.min(parseInt(timer) || 60, 300));
 
+    // Sauvegarde les rôles — garde même les rôles sans nom (en cours de frappe)
     if (Array.isArray(customRoles)) {
       room.config.customRoles = customRoles
         .slice(0, 20)
@@ -118,9 +126,15 @@ module.exports = async (req, res) => {
           name:        (r.name || '').substring(0, 30),
           description: (r.description || '').substring(0, 120),
           type:        r.type === 'impostor' ? 'impostor' : 'crewmate'
-        }))
-        .filter(r => r.name.trim());
+        }));
+      // Ne filtre PAS sur name.trim() pour ne pas supprimer les rôles vides en cours d'édition
     }
+
+    // specialCounts — clampés au nb de rôles du type correspondant
+    const impRoles  = room.config.customRoles.filter(r => r.type === 'impostor').length;
+    const crewRoles = room.config.customRoles.filter(r => r.type === 'crewmate').length;
+    room.config.specialImpCount  = Math.min(Math.max(0, parseInt(specialImpCount)  || 0), impRoles);
+    room.config.specialCrewCount = Math.min(Math.max(0, parseInt(specialCrewCount) || 0), crewRoles);
 
     setRoom(roomCode, room);
     return res.status(200).json({ ok: true, config: room.config });
@@ -140,28 +154,44 @@ module.exports = async (req, res) => {
     room.winner   = null;
     room.messages = [];
 
-    const ids           = shuffle(Object.keys(room.players));
-    const { impostorCount, customRoles } = room.config;
-    const impostorRoles = (customRoles || []).filter(r => r.type === 'impostor');
-    const crewmateRoles = (customRoles || []).filter(r => r.type === 'crewmate');
+    const ids = shuffle(Object.keys(room.players));
+    const { impostorCount, customRoles, specialImpCount, specialCrewCount } = room.config;
+
+    // Rôles valides (avec nom)
+    const impostorRoles = (customRoles || []).filter(r => r.type === 'impostor' && r.name.trim());
+    const crewmateRoles = (customRoles || []).filter(r => r.type === 'crewmate' && r.name.trim());
+
+    // Combien de rôles spéciaux distribuer
+    const nSpecialImp  = Math.min(specialImpCount  || 0, impostorRoles.length, impostorCount);
+    const nSpecialCrew = Math.min(specialCrewCount || 0, crewmateRoles.length, ids.length - impostorCount);
+
     let ii = 0, ci = 0;
 
     ids.forEach((id, idx) => {
       const p     = room.players[id];
       const isImp = idx < impostorCount;
-      p.role      = isImp ? 'impostor' : 'crewmate';
-      p.isAlive   = true;
-      p.hasVoted  = false;
+      p.role     = isImp ? 'impostor' : 'crewmate';
+      p.isAlive  = true;
+      p.hasVoted = false;
 
       if (isImp) {
-        const cr      = impostorRoles[ii % (impostorRoles.length || 1)];
-        p.customRole  = impostorRoles.length ? cr.name        : 'Imposteur';
-        p.description = impostorRoles.length ? cr.description : '🔪 Élimine les équipiers sans te faire repérer.';
+        // Distribue un rôle spécial si encore disponible, sinon rôle générique
+        if (impostorRoles.length > 0 && ii < nSpecialImp) {
+          p.customRole  = impostorRoles[ii % impostorRoles.length].name;
+          p.description = impostorRoles[ii % impostorRoles.length].description;
+        } else {
+          p.customRole  = 'Imposteur';
+          p.description = '🔪 Élimine les équipiers sans te faire repérer.';
+        }
         ii++;
       } else {
-        const cr      = crewmateRoles[ci % (crewmateRoles.length || 1)];
-        p.customRole  = crewmateRoles.length ? cr.name        : 'Équipier';
-        p.description = crewmateRoles.length ? cr.description : '🔍 Trouve et vote contre l\'imposteur.';
+        if (crewmateRoles.length > 0 && ci < nSpecialCrew) {
+          p.customRole  = crewmateRoles[ci % crewmateRoles.length].name;
+          p.description = crewmateRoles[ci % crewmateRoles.length].description;
+        } else {
+          p.customRole  = 'Équipier';
+          p.description = '🔍 Trouve et vote contre l\'imposteur.';
+        }
         ci++;
       }
     });
